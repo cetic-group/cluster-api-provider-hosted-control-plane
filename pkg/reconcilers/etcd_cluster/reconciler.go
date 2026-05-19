@@ -198,7 +198,6 @@ func (er *etcdClusterReconciler) ReconcileEtcdCluster(
 				return "etcd StatefulSet is not ready", nil
 			}
 
-
 			if err := er.reconcileETCDMaintenance(ctx, etcdClient, hostedControlPlane, etcdPods); err != nil {
 				return "", err
 			}
@@ -483,7 +482,6 @@ func (er *etcdClusterReconciler) reconcileETCDDefragmentation(
 		},
 	)
 }
-
 
 //+kubebuilder:rbac:groups="",resources=services,verbs=create;patch
 
