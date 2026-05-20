@@ -1,0 +1,127 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    cluster.x-k8s.io/provider: control-plane-hosted-control-plane
+    control-plane: controller-manager
+  name: capi-hosted-control-plane-controller-manager
+  namespace: capi-hosted-control-plane-system
+  annotations:
+    ccp.cloud/source: cetic-group/cluster-api-provider-hosted-control-plane
+spec:
+  progressDeadlineSeconds: 600
+  replicas: 1
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      cluster.x-k8s.io/provider: control-plane-hosted-control-plane
+      control-plane: controller-manager
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
+  template:
+    metadata:
+      annotations:
+        kubectl.kubernetes.io/restartedAt: '2026-05-18T17:17:45+02:00'
+      labels:
+        cluster.x-k8s.io/provider: control-plane-hosted-control-plane
+        control-plane: controller-manager
+    spec:
+      containers:
+      - command:
+        - /manager
+        env:
+        - name: AWS_ENDPOINT_URL_S3
+          value: https://s3.in.techledger.io
+        - name: CONTROLLER_NAMESPACE
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.namespace
+        - name: CA_CERTIFICATE_DURATION
+          value: 87600h
+        - name: CERTIFICATE_DURATION
+          value: 8760h
+        image: registry.cloud.cetic-group.com/ccp/cluster-api-provider-hosted-control-plane:v1.5.0-cetic.2
+        imagePullPolicy: IfNotPresent
+        livenessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /healthz
+            port: health
+            scheme: HTTP
+          initialDelaySeconds: 15
+          periodSeconds: 20
+          successThreshold: 1
+          timeoutSeconds: 1
+        name: manager
+        ports:
+        - containerPort: 8081
+          name: health
+          protocol: TCP
+        - containerPort: 9443
+          name: webhooks
+          protocol: TCP
+        - containerPort: 8080
+          name: metrics
+          protocol: TCP
+        readinessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /readyz
+            port: health
+            scheme: HTTP
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 1
+        resources:
+          limits:
+            memory: 256Mi
+          requests:
+            memory: 128Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          privileged: false
+          readOnlyRootFilesystem: true
+          runAsGroup: 1000
+          runAsNonRoot: true
+          runAsUser: 1000
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /tmp/k8s-webhook-server/serving-certs
+          name: webhook-serving-certificates
+      dnsPolicy: ClusterFirst
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext:
+        runAsGroup: 1000
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      serviceAccount: capi-hosted-control-plane-manager
+      serviceAccountName: capi-hosted-control-plane-manager
+      terminationGracePeriodSeconds: 10
+      topologySpreadConstraints:
+      - labelSelector:
+          matchLabels:
+            cluster.x-k8s.io/provider: control-plane-hosted-control-plane
+            control-plane: hosted-control-plane-controller-manager
+        maxSkew: 1
+        nodeAffinityPolicy: Honor
+        nodeTaintsPolicy: Honor
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: DoNotSchedule
+      volumes:
+      - name: webhook-serving-certificates
+        secret:
+          defaultMode: 420
+          secretName: capi-hosted-control-plane-webhook-service-certificate
+
