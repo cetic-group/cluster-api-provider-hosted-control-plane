@@ -1,0 +1,25 @@
+# CETIC custom build : Dockerfile self-contained avec Go toolchain (pas besoin
+# de Task). Produit la même image que `task build` mais sans dépendre du build
+# system upstream. Utilisé pour build l'image custom CETIC :
+#
+#   docker build -f deploy/cetic/Dockerfile.cetic \
+#     -t registry.cloud.cetic-group.com/ccp/cluster-api-provider-hosted-control-plane:v1.5.0-cetic.X .
+#   docker push registry.cloud.cetic-group.com/ccp/cluster-api-provider-hosted-control-plane:v1.5.0-cetic.X
+#
+# Le tag `v1.5.0-cetic.X` matche le tag upstream + un suffixe CETIC pour
+# tracker nos rebuilds. À bumper à chaque rebase upstream ou modif de notre
+# patch.
+
+FROM golang:1.25 AS builder
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    go build -ldflags="-s -w -X main.version=v1.5.0-cetic" \
+    -o /out/manager ./cmd/hosted-control-plane-controller
+
+FROM scratch
+COPY --from=builder /out/manager /manager
+USER 1000:1000
+ENTRYPOINT ["/manager"]
