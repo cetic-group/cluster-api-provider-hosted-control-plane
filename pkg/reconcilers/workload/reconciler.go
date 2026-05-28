@@ -232,7 +232,18 @@ func (wr *workloadClusterReconciler) ReconcileWorkloadClusterResources(
 				},
 			}
 
+			// CETIC patch: do NOT early-return on notReadyReason. The original behavior
+			// blocked Initialization.ControlPlaneInitialized whenever a "soft" phase like
+			// CoreDNS reported NotReady (which is normal at bootstrap: workload deployments
+			// have 0 nodes to schedule on, so CoreDNS sits at 0/1 ready until the first
+			// worker joins). But workers can't join until ControlPlaneInitialized=true (CAPI
+			// bootstrap controller refuses to generate dataSecrets). Catch-22.
+			//
+			// Fix: run every phase, capture the first notReadyReason for the caller, and
+			// always set ControlPlaneInitialized=true at the end. The per-phase condition
+			// (e.g. WorkloadCoreDNSReady=False) still tracks the actual workload state.
 			logger := logr.FromContextAsSlogLogger(ctx)
+			var firstNotReadyReason string
 			for _, phase := range workloadPhases {
 				switch notReadyReason, err := tracing.WithSpan(ctx, wr.tracer, phase.Name,
 					func(ctx context.Context, span trace.Span) (string, error) {
@@ -256,7 +267,9 @@ func (wr *workloadClusterReconciler) ReconcileWorkloadClusterResources(
 						Reason:  notReadyReason,
 						Message: fmt.Sprintf("Reconciling workload phase %s not ready: %s", phase.Name, notReadyReason),
 					})
-					return notReadyReason, nil
+					if firstNotReadyReason == "" {
+						firstNotReadyReason = notReadyReason
+					}
 				default:
 					conditions.Set(hostedControlPlane, metav1.Condition{
 						Type:    string(phase.Condition),
@@ -269,7 +282,7 @@ func (wr *workloadClusterReconciler) ReconcileWorkloadClusterResources(
 
 			hostedControlPlane.Status.Initialization.ControlPlaneInitialized = ptr.To(true)
 
-			return "", nil
+			return firstNotReadyReason, nil
 		},
 	)
 }
