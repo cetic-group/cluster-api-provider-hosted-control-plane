@@ -53,7 +53,7 @@ func NewCertificateReconciler(
 		kubernetesServiceIP:        kubernetesServiceIP,
 		caCertificateDuration:      caCertificateDuration,
 		certificateDuration:        certificateDuration,
-		certificateRenewBefore:     int32(50),
+		certificateRenewBefore:     30 * 24 * time.Hour,
 		konnectivityServerAudience: konnectivityServerAudience,
 		tracer:                     tracing.GetTracer("certificates"),
 	}
@@ -64,7 +64,7 @@ type certificateReconciler struct {
 	kubernetesServiceIP        net.IP
 	caCertificateDuration      time.Duration
 	certificateDuration        time.Duration
-	certificateRenewBefore     int32
+	certificateRenewBefore     time.Duration
 	konnectivityServerAudience string
 	tracer                     string
 }
@@ -266,7 +266,7 @@ func (cr *certificateReconciler) createCertificateSpec(
 		WithIsCA(isCA).
 		WithCommonName(commonName).
 		WithDuration(metav1.Duration{Duration: slices.Ternary(isCA, cr.caCertificateDuration, cr.certificateDuration)}).
-		WithRenewBeforePercentage(cr.certificateRenewBefore)
+		WithRenewBefore(metav1.Duration{Duration: cr.certificateRenewBefore})
 }
 
 func (cr *certificateReconciler) createCertificateSpecs(
@@ -459,7 +459,7 @@ func (cr *certificateReconciler) ReconcileCertificates(
 		func(ctx context.Context, span trace.Span) (string, error) {
 			span.SetAttributes(
 				attribute.String("certificate.duration", cr.certificateDuration.String()),
-				attribute.Int("certificate.renewBeforePercentage", int(cr.certificateRenewBefore)),
+				attribute.String("certificate.renewBefore", cr.certificateRenewBefore.String()),
 				attribute.String("konnectivity.serverAudience", cr.konnectivityServerAudience),
 			)
 			var notReadyReasons []string
