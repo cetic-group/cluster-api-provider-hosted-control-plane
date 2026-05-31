@@ -81,3 +81,47 @@ This project uses [Task](https://taskfile.dev) as the build system. Key commands
 The project includes a `task dev` (telepresence) task for local development with remote Kubernetes clusters, allowing
 local debugging while connected to a cluster environment. This enables running the controller locally while it interacts
 with a remote Kubernetes cluster.
+
+## Cetic fork notes (branch `cetic/v1.6.0`)
+
+This is the `cetic-group/cluster-api-provider-hosted-control-plane` fork of upstream `teutonet`. Image is published to
+the internal registry: `registry.cloud.cetic-group.com/ccp/cluster-api-provider-hosted-control-plane:v1.6.0-cetic.N`.
+
+### Certificate durations — DO NOT shorten
+
+`pkg/hostedcontrolplane/controller.go` sets `caCertificatesDuration` / `certificatesDuration`. Upstream defaulted these
+to **48h / 24h** (commit f3722502). With cert-manager those values mean the CA **rotates ~24h after cluster creation**,
+and since neither etcd nor kube-apiserver hot-reload their trusted CA, pods started before vs after the rotation end up
+on incompatible CAs → split-brain (etcd peer `tls: bad certificate`, apiserver `unknown certificate authority`,
+`Error creating leases: context deadline exceeded`, CrashLoopBackOff). This bricks **every** cluster (CCKS and dbaas)
+~1 day after creation. Both are set to **20 years** here (`20 * 365 * 24 * time.Hour`).
+
+**Gotcha (fixed in cetic.3):** `pkg/reconcilers/certificates/reconciler.go` used `certificateRenewBefore: int32(50)`
+applied via `WithRenewBeforePercentage`. With a 20-year duration, `duration * percentage` **overflows int64
+nanoseconds** in cert-manager's webhook, which then rejects every CA (`renewBeforePercentage ... must result in a
+renewBefore greater than 5m0s`), blocking all certificate reconciliation and new cluster creation. Use an **absolute**
+`renewBefore` instead (field is `time.Duration` = `30 * 24 * time.Hour`, applied via `WithRenewBefore`). Max safe
+duration with the percentage form would be <~2.9 years; the absolute form lifts that limit.
+
+### Building/deploying without Task/buildah
+
+`task`/`buildah` may be absent on the dev box. Manual build that matches the Taskfile:
+
+```bash
+CGO_ENABLED=0 GOARCH=amd64 GOOS=linux go build \
+  -ldflags="-X=main.version=v1.6.0-cetic.N -s -w" -trimpath \
+  -o build/manager-amd64 ./cmd/hosted-control-plane-controller/main.go
+docker build -f Containerfile --build-arg manager=build/manager-amd64 \
+  -t registry.cloud.cetic-group.com/ccp/cluster-api-provider-hosted-control-plane:v1.6.0-cetic.N .
+docker push registry.cloud.cetic-group.com/ccp/cluster-api-provider-hosted-control-plane:v1.6.0-cetic.N
+kubectl -n capi-hosted-control-plane-system set image \
+  deploy/capi-hosted-control-plane-controller-manager manager=...:v1.6.0-cetic.N
+```
+
+### Migrating an already-broken cluster
+
+The controller rewrites durations on reconcile, but to converge an existing cluster without a fresh split: patch the 3
+CA Certificates with `spec.privateKey.rotationPolicy: Never` + `duration: 175200h` + `renewBefore: 720h` +
+`renewBeforePercentage: null`, **verify the CA SubjectKeyIdentifier is unchanged before/after** (key reused = no split),
+patch the leaf certs likewise, then rolling-restart etcd one-by-one (check quorum between each) and
+`rollout restart` the apiserver/controller-manager/scheduler deployments.
