@@ -174,6 +174,11 @@ func (arr *apiServerResourcesReconciler) ReconcileApiServerDeployments(
 			if err := arr.reconcileAuthenticationConfig(ctx, hostedControlPlane, cluster); err != nil {
 				return "", fmt.Errorf("failed to reconcile authentication config: %w", err)
 			}
+			if ready, err := arr.reconcileServiceAccountKeys(ctx, hostedControlPlane, cluster); err != nil {
+				return "", fmt.Errorf("failed to reconcile service account keys: %w", err)
+			} else if !ready {
+				return "Service account keys not ready", nil
+			}
 			if ready, err := arr.reconcileAPIServerDeployment(ctx, hostedControlPlane, cluster); err != nil {
 				return "", fmt.Errorf("failed to reconcile API server deployment: %w", err)
 			} else if !ready {
@@ -861,15 +866,23 @@ func (arr *apiServerResourcesReconciler) createAPIServerCertificatesVolume(
 							WithPath(konstants.FrontProxyClientKeyName),
 					),
 				),
+				// Signs with the current key only...
 				corev1ac.VolumeProjection().WithSecret(corev1ac.SecretProjection().
 					WithName(names.GetServiceAccountSecretName(cluster)).
 					WithItems(
 						corev1ac.KeyToPath().
-							WithKey(corev1.TLSCertKey).
-							WithPath(konstants.ServiceAccountPublicKeyName),
-						corev1ac.KeyToPath().
 							WithKey(corev1.TLSPrivateKeyKey).
 							WithPath(konstants.ServiceAccountPrivateKeyName),
+					),
+				),
+				// ...but verifies against the current and the previous public
+				// key, so a key rotation does not reject tokens issued before it.
+				corev1ac.VolumeProjection().WithSecret(corev1ac.SecretProjection().
+					WithName(names.GetServiceAccountKeysSecretName(cluster)).
+					WithItems(
+						corev1ac.KeyToPath().
+							WithKey(serviceAccountKeysBundleKey).
+							WithPath(konstants.ServiceAccountPublicKeyName),
 					),
 				),
 				corev1ac.VolumeProjection().WithSecret(corev1ac.SecretProjection().

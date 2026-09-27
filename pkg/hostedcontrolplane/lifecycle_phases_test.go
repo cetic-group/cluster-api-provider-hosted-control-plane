@@ -2,11 +2,19 @@ package hostedcontrolplane
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/big"
 	"os"
 	"testing"
+	"time"
 
 	certmanagerv1 "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
 	certmanagerv1ac "github.com/cert-manager/cert-manager/pkg/client/applyconfigurations/certmanager/v1"
@@ -39,6 +47,7 @@ import (
 	v2 "k8s.io/client-go/applyconfigurations/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/util/keyutil"
 	"k8s.io/cluster-bootstrap/token/api"
 	konstants "k8s.io/kubernetes/cmd/kubeadm/app/constants"
 	"k8s.io/kubernetes/pkg/controller/certificates/rootcacertpublisher"
@@ -734,6 +743,17 @@ func TestHostedControlPlane_FullLifecycle(t *testing.T) {
 		},
 		{
 			name: "Make API Server Deployment Ready",
+			verifyResources: func(ctx context.Context, g *WithT) {
+				// The API server verifies tokens against this bundle: it must
+				// exist, with a usable key, before the deployment mounts it.
+				keys, err := managementClusterClient.CoreV1().Secrets(hcp.Namespace).Get(
+					ctx,
+					fmt.Sprintf("%s-service-account-keys", cluster.Name),
+					metav1.GetOptions{},
+				)
+				g.Expect(err).To(Succeed())
+				g.Expect(keyutil.ParsePublicKeysPEM(keys.Data["sa-keys.pub"])).To(HaveLen(1))
+			},
 			verifyConditionsBefore: map[bool][]types2.GomegaMatcher{
 				false: {
 					NewConditionVerification(
@@ -1598,11 +1618,17 @@ func makeCertificateReady(
 				),
 		), certManagerOptions)).Error().To(Succeed())
 
+		certificatePEM := []byte(fmt.Sprintf("fake-%s-cert", name))
+		if name == "service-account" {
+			// The provider reads the public key of this one to build the key
+			// bundle the API server verifies tokens against.
+			certificatePEM = selfSignedCertificatePEM(g, name)
+		}
 		g.Expect(secretInterface.Apply(ctx,
 			corev1ac.Secret(cert.Spec.SecretName, hcp.Namespace).
 				WithData(
 					map[string][]byte{
-						"tls.crt": []byte(fmt.Sprintf("fake-%s-cert", name)),
+						"tls.crt": certificatePEM,
 						"tls.key": []byte(fmt.Sprintf("fake-%s-key", name)),
 						"ca.crt":  []byte(fmt.Sprintf("fake-%s-cert", name)),
 					},
@@ -1610,6 +1636,20 @@ func makeCertificateReady(
 			certManagerOptions,
 		)).Error().To(Succeed())
 	}
+}
+
+func selfSignedCertificatePEM(g *WithT, commonName string) []byte {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	g.Expect(err).To(Succeed())
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: commonName},
+		NotBefore:    time.Now(),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	g.Expect(err).To(Succeed())
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 }
 
 func createInfraClusterCRD(group string, version string, kind string) *apiextensionsv1.CustomResourceDefinition {

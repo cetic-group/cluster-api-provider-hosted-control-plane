@@ -64,6 +64,13 @@ func GetServiceAccountSecretName(cluster *capiv2.Cluster) string {
 	return cluster.Name + "-service-account"
 }
 
+// GetServiceAccountKeysSecretName names the secret holding the public keys the
+// API server accepts for service account tokens: the current one and the one
+// it replaced.
+func GetServiceAccountKeysSecretName(cluster *capiv2.Cluster) string {
+	return cluster.Name + "-service-account-keys"
+}
+
 func GetServiceName(cluster *capiv2.Cluster) string {
 	return "s-" + cluster.Name
 }
