@@ -7,6 +7,7 @@ import (
 	. "github.com/teutonet/cluster-api-provider-hosted-control-plane/test"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	corev1ac "k8s.io/client-go/applyconfigurations/core/v1"
 	"k8s.io/client-go/kubernetes/fake"
 )
 
@@ -434,4 +435,37 @@ func TestCalculateChecksum_Deterministic(t *testing.T) {
 		"checksums should be identical across multiple calls: %s, %s, %s",
 		checksum1, checksum2, checksum3,
 	)
+}
+
+func TestSetChecksumAnnotations_SkipsOptionalConfigMaps(t *testing.T) {
+	g, ctx, _ := G(t)
+	client := fake.NewClientset(&corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "required", Namespace: namespace},
+		Data:       map[string]string{"key": "value"},
+	})
+
+	requiredVolume := corev1ac.Volume().WithName("required").
+		WithConfigMap(corev1ac.ConfigMapVolumeSource().WithName("required"))
+
+	expected, err := SetChecksumAnnotations(ctx, client, namespace,
+		corev1ac.PodTemplateSpec().WithSpec(corev1ac.PodSpec().WithVolumes(requiredVolume)),
+	)
+	g.Expect(err).NotTo(HaveOccurred())
+	g.Expect(expected.Annotations).To(HaveKey("checksum/configmaps"))
+
+	// the optional ConfigMaps don't exist, so including them would fail
+	template, err := SetChecksumAnnotations(ctx, client, namespace,
+		corev1ac.PodTemplateSpec().WithSpec(corev1ac.PodSpec().WithVolumes(
+			requiredVolume,
+			corev1ac.Volume().WithName("optional").
+				WithConfigMap(corev1ac.ConfigMapVolumeSource().WithName("optional").WithOptional(true)),
+			corev1ac.Volume().WithName("projected").
+				WithProjected(corev1ac.ProjectedVolumeSource().WithSources(
+					corev1ac.VolumeProjection().
+						WithConfigMap(corev1ac.ConfigMapProjection().WithName("optional-projected").WithOptional(true)),
+				)),
+		)),
+	)
+	g.Expect(err).NotTo(HaveOccurred())
+	g.Expect(template.Annotations).To(Equal(expected.Annotations))
 }

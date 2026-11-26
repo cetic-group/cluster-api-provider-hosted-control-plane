@@ -306,6 +306,49 @@ Each provider supports:
 | `certificateAuthority` | No       | PEM-encoded CA bundle for verifying the provider's TLS certificate     |
 | `claimValidationRules` | No       | CEL expressions that must evaluate to `true` for the token to be valid |
 
+## 🌐 CoreDNS Customization
+
+The controller deploys CoreDNS into every workload cluster and owns its `kube-system/coredns` ConfigMap, so changes to
+the `Corefile` are overwritten on the next reconciliation. To extend the DNS configuration, create a ConfigMap named
+`coredns-custom` in the `kube-system` namespace **of the workload cluster**, following the k3s/RKE2 convention:
+
+- keys ending in `.server` are imported as additional server blocks, e.g. to forward a private zone to another resolver;
+- keys ending in `.override` are imported into the default `.:53` server block, e.g. to add plugins like `log` or
+  `hosts`.
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: coredns-custom
+  namespace: kube-system
+data:
+  corp.server: |
+    corp.example.com:53 {
+        errors
+        cache 30
+        forward . 10.0.0.53 10.0.1.53
+    }
+  log.override: |
+    log
+```
+
+The ConfigMap is optional and is neither created nor modified by the controller: without it, CoreDNS behaves exactly
+as before. It is mounted into the CoreDNS pods at `/etc/coredns/custom`, and the `reload` plugin applies changes
+without restarting the pods. Expect up to about two minutes until a change is active (kubelet ConfigMap sync plus the
+`reload` interval).
+
+Things to keep in mind:
+
+- An invalid configuration is rejected by the running pods (`plugin/reload: Corefile changed but reload failed` in the
+  logs), which keep serving the previous one. Pods that start while the configuration is invalid fail to start, so check
+  the CoreDNS logs after each change.
+- Server blocks must not overlap with the default `.:53` block; use specific zones.
+- The CoreDNS pods may only send DNS traffic (port 53) to destinations outside the cluster, so forward targets have to
+  be reachable on port 53.
+- The file names `hcp-placeholder.server` and `hcp-placeholder.override` are reserved: the controller mounts these
+  empty files next to your keys so that CoreDNS doesn't warn about empty import globs.
+
 ## 🔑 RBAC for Users
 
 The release manifest ships two aggregated ClusterRoles so that subjects bound to the builtin `view`, `edit` or `admin`

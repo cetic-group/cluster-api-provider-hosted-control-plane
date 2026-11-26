@@ -13,6 +13,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	corev1ac "k8s.io/client-go/applyconfigurations/core/v1"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/utils/ptr"
 
 	"github.com/teutonet/cluster-api-provider-hosted-control-plane/pkg/util/tracing"
 )
@@ -89,14 +90,16 @@ func extractSecretNames(volumes []corev1ac.VolumeApplyConfiguration) []string {
 	})
 }
 
+// extractConfigMapNames skips optional ConfigMaps: they might not exist, and the workloads mounting them are expected
+// to pick up changes on their own instead of being rolled out.
 func extractConfigMapNames(volumes []corev1ac.VolumeApplyConfiguration) []string {
 	return extractNames(volumes, func(volume corev1ac.VolumeApplyConfiguration) string {
-		if volume.ConfigMap != nil {
+		if volume.ConfigMap != nil && !ptr.Deref(volume.ConfigMap.Optional, false) {
 			return *volume.ConfigMap.Name
 		}
 		return ""
 	}, func(configuration *corev1ac.VolumeProjectionApplyConfiguration) string {
-		if configuration.ConfigMap != nil {
+		if configuration.ConfigMap != nil && !ptr.Deref(configuration.ConfigMap.Optional, false) {
 			return *configuration.ConfigMap.Name
 		}
 		return ""
