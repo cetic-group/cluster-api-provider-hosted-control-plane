@@ -13,6 +13,7 @@ require (
 	github.com/caarlos0/env/v11 v11.4.1
 	github.com/cert-manager/cert-manager v1.21.2
 	github.com/cilium/cilium v1.20.2
+	github.com/coredns/caddy v1.1.4
 	github.com/coredns/corefile-migration v1.0.35
 	github.com/go-logr/logr v1.4.4
 	github.com/onsi/gomega v1.44.0
@@ -47,6 +48,7 @@ require (
 	sigs.k8s.io/cluster-api/api v1.14.3
 	sigs.k8s.io/controller-runtime v0.25.2
 	sigs.k8s.io/gateway-api v1.6.3
+	sigs.k8s.io/yaml v1.6.0
 )
 
 require (
@@ -82,7 +84,6 @@ require (
 	github.com/containerd/errdefs/pkg v0.3.0 // indirect
 	github.com/containerd/log v0.1.0 // indirect
 	github.com/containerd/platforms v0.2.1 // indirect
-	github.com/coredns/caddy v1.1.4 // indirect
 	github.com/coreos/go-semver v0.3.1 // indirect
 	github.com/coreos/go-systemd/v22 v22.7.0 // indirect
 	github.com/cpuguy83/dockercfg v0.3.2 // indirect
@@ -225,7 +226,6 @@ require (
 	sigs.k8s.io/kustomize/kyaml v0.21.1 // indirect
 	sigs.k8s.io/randfill v1.0.0 // indirect
 	sigs.k8s.io/structured-merge-diff/v6 v6.4.2 // indirect
-	sigs.k8s.io/yaml v1.6.0 // indirect
 )
 
 replace (
