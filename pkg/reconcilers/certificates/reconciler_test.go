@@ -2,10 +2,13 @@ package certificates
 
 import (
 	"testing"
+	"time"
 
 	certmanagerv1 "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
 	certmanagermetav1 "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
 	. "github.com/onsi/gomega"
+	"github.com/teutonet/cluster-api-provider-hosted-control-plane/pkg/operator/util/names"
+	. "github.com/teutonet/cluster-api-provider-hosted-control-plane/test"
 )
 
 func TestCertificateReconciler_isIssuerReady(t *testing.T) {
@@ -71,7 +74,7 @@ func TestCertificateReconciler_isIssuerReady(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			g := NewWithT(t)
+			g, _, _ := G(t)
 			result := reconciler.isIssuerReady(tt.issuer)
 
 			g.Expect(result).To(Equal(tt.expected))
@@ -133,7 +136,7 @@ func TestCertificateReconciler_isCertificateReady(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			g := NewWithT(t)
+			g, _, _ := G(t)
 			result := reconciler.isCertificateReady(tt.certificate)
 
 			g.Expect(result).To(Equal(tt.expected))
@@ -142,7 +145,7 @@ func TestCertificateReconciler_isCertificateReady(t *testing.T) {
 }
 
 func TestCertificateReconciler_ErrorHandling_EdgeCases(t *testing.T) {
-	g := NewWithT(t)
+	g, _, _ := G(t)
 	reconciler := &certificateReconciler{}
 
 	emptyIssuer := &certmanagerv1.Issuer{
@@ -174,4 +177,15 @@ func TestCertificateReconciler_ErrorHandling_EdgeCases(t *testing.T) {
 	}
 
 	g.Expect(reconciler.isCertificateReady(inconsistentCertificate)).To(BeFalse())
+}
+
+func TestCertificateReconciler_createCertificateSpecs_ServiceAccountKeepsPrivateKey(t *testing.T) {
+	g, _, _ := G(t)
+	r := &certificateReconciler{certificateDuration: time.Hour, caCertificateDuration: time.Hour}
+
+	specs := r.createCertificateSpecs(bundleTestHCP, bundleTestCluster)
+
+	serviceAccount := specs[names.GetServiceAccountCertificateName(bundleTestCluster)]
+	g.Expect(serviceAccount.spec.PrivateKey).NotTo(BeNil())
+	g.Expect(*serviceAccount.spec.PrivateKey.RotationPolicy).To(Equal(certmanagerv1.RotationPolicyNever))
 }

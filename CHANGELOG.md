@@ -1,5 +1,88 @@
 # Changelog
 
+## [1.8.0](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/compare/v1.7.2...v1.8.0) (2026-10-09)
+
+
+### Features
+
+* add various docs about working together ([#142](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/issues/142)) ([f5bbe43](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/commit/f5bbe43179a358c19c2f7ee3b737a5272e73987e))
+* **ci:** sign pushed images with cosign keyless signing ([#216](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/issues/216)) ([6630388](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/commit/66303886ff8b6b3fffa68b97dab0d0da28724a04))
+* generate and publish SBOM covering controller-manager and bundled images ([#215](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/issues/215)) ([6178fb3](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/commit/6178fb341e2689b501a72669b4a760b4e454c70b))
+* keep the workload kubernetes endpoints stable during apiserver rollouts ([#255](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/issues/255)) ([f17b074](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/commit/f17b074c956ecdb7daf6220cac6ca57f08a5e9cf))
+* **konnectivity:** shorten the agent gap after apiserver restarts ([#254](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/issues/254)) ([f316f50](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/commit/f316f50803cd47d3df2d230e67759c27256470af))
+* track coredns and nginx image versions via renovate ([#193](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/issues/193)) ([96f2f99](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/commit/96f2f99a07de90c516098d83031444bb3942aff4))
+
+
+### Bug Fixes
+
+* **ci:** authenticate cosign separately from buildah before signing ([#217](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/issues/217)) ([b27b2f2](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/commit/b27b2f25f5fc19e9938b982dc1a7b3a717cd42d9))
+* correct renovate depName for konnectivity image ([#146](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/issues/146)) ([d8c2037](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/commit/d8c2037269ef31b96a6838d72132191747c75b6c))
+* **etcd:** pin image tag independently from client library version ([#230](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/issues/230)) ([e24be0d](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/commit/e24be0d9506d043dc160c920748b8d82df6efb83))
+* run go mod tidy after renovate updates go.mod ([#157](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/issues/157)) ([50884a9](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/commit/50884a97032f69b2dc4f0167341fdfc4ef6e0d41))
+
+## [1.7.2](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/compare/v1.7.1...v1.7.2) (2026-07-10)
+
+
+### Bug Fixes
+
+* set hcp initialized earlier ([#139](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/issues/139)) ([55b2514](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/commit/55b25148f08c129c4b9e91c69f6c915bcaec2cd8))
+
+## [1.7.1](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/compare/v1.7.0...v1.7.1) (2026-07-01)
+
+
+### Bug Fixes
+
+* **node_rotation:** add watch verb to machinedeployments/machinepools RBAC ([#137](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/issues/137)) ([2640e9c](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/commit/2640e9c63f0a864c239c7079bd83c7a90a1446b1))
+
+## [1.7.0](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/compare/v1.6.1...v1.7.0) (2026-06-24)
+
+
+### Features
+
+* rotate nodes on CA rotation ([#135](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/issues/135)) ([fd660fe](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/commit/fd660fe95eac55a679750ebc12519ce63f243ffb))
+
+
+### Bug Fixes
+
+* remove SetDefaults_KubeletConfiguration ([#134](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/issues/134)) ([ff56dce](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/commit/ff56dce73c216e4c1e1bc6e022a1aa0a16a4e7c3))
+
+## [1.6.1](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/compare/v1.6.0...v1.6.1) (2026-05-29)
+
+
+### Bug Fixes
+
+* sort oidc providers ([#131](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/issues/131)) ([8f138cd](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/commit/8f138cdcba25cfcfd979fc02e21e9380593be68a))
+
+## [1.6.0](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/compare/v1.5.0...v1.6.0) (2026-05-28)
+
+
+### Features
+
+* add `trimpath` while building ([#81](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/issues/81)) ([a904142](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/commit/a9041428f13e58560ab111103f4a99497999cd18))
+* add automatic defragmentation for etcd ([#127](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/issues/127)) ([0e76c87](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/commit/0e76c87b5578241c1e4e8d53e51371bd28e5403c))
+* add env var to filter reconciliation ([#119](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/issues/119)) ([4d74620](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/commit/4d7462055d21c177cfff4a369139a35bcf73faa6))
+* add observedGeneration for better visibility ([#99](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/issues/99)) ([91e4323](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/commit/91e43235653156821c1685cc7f170b34d012c962))
+* add OIDC configuration option ([#108](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/issues/108)) ([035cae0](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/commit/035cae08d8bc24c7a81005d95225b73511d50355))
+* add option to create custom kubeconfigs ([#89](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/issues/89)) ([f372250](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/commit/f372250255eb74fb51927ef4c9b77eec771403e3))
+* add S3 endpoint override for S3-compatible storage ([#117](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/issues/117)) ([25af46d](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/commit/25af46d8f6f6a2fa80bb9d8a14c563592b5156e9))
+* auto-merge Dependabot PRs ([#78](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/issues/78)) ([20adf68](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/commit/20adf68849954f8f8a3087776d57e8c3f91ff811))
+* check for CVEs during linting ([#66](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/issues/66)) ([8163a19](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/commit/8163a19d1acd5e2e7236ab1ab672ef85d99ca799))
+* enable workflows for merge queue ([#79](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/issues/79)) ([5d1fac5](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/commit/5d1fac52b7aaba27706ec13e2030df3b136036e6))
+* scale workload deployments to at least one ([#97](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/issues/97)) ([acf1e70](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/commit/acf1e700c5c6268cfbcf219bbb318ffe764ed08b))
+* update docs to keep in line with reality ([#74](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/issues/74)) ([08fbb4a](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/commit/08fbb4a5e7a09d82a70d6ea27b03b658a7b1995b))
+
+
+### Bug Fixes
+
+* cap konnectivity image to 0.34.0 ([#128](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/issues/128)) ([57ceb8b](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/commit/57ceb8bec072c005afd4501b7c131bb0041a0da1))
+* **docs:** Fix links and namespace ([#67](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/issues/67)) ([fe73b55](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/commit/fe73b55e83917e7de2142150c00c2825c9662362))
+* etcd fails due to unaccounted space usage (e.g. WAL) ([#115](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/issues/115)) ([de07918](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/commit/de07918c8de0900849b762ce042f996b32474e0e))
+* pass correct port to konnectivity workload reconciler ([#73](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/issues/73)) ([4e3664c](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/commit/4e3664c0538690f02969211243857096a27bab93))
+* spec is a required field in the HostedControlPlaneTemplate ([#75](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/issues/75)) ([442c974](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/commit/442c9740f6f4f8db4759c527679163231af55d8d))
+* use more specific tolerations for coredns ([#88](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/issues/88)) ([e8e152c](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/commit/e8e152cef0cfd70fea0779b125117cf183d0c1e9))
+* use new events apiGroup ([#107](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/issues/107)) ([2fd68c8](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/commit/2fd68c875f08cecc4fb2e0edd7da3284c2ab9ec2))
+* use the SchemaURL of the defaultResource ([#90](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/issues/90)) ([0caadb8](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/commit/0caadb8708ef740e68c2994fea2535a90b30eb43))
+
 ## [1.5.0](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/compare/v1.4.0...v1.5.0) (2025-11-26)
 
 

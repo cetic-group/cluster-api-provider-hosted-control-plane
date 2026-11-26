@@ -7,12 +7,13 @@ import (
 	. "github.com/onsi/gomega/gcustom"
 	. "github.com/onsi/gomega/gstruct"
 	"github.com/teutonet/cluster-api-provider-hosted-control-plane/api/v1alpha1"
+	"github.com/teutonet/cluster-api-provider-hosted-control-plane/pkg/operator/util/names"
+	. "github.com/teutonet/cluster-api-provider-hosted-control-plane/test"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	v1 "k8s.io/client-go/applyconfigurations/meta/v1"
 	capiv2 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	gwv1 "sigs.k8s.io/gateway-api/apis/v1"
-	gwv1alpha2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 	v2 "sigs.k8s.io/gateway-api/applyconfiguration/apis/v1"
 	"sigs.k8s.io/gateway-api/pkg/client/clientset/versioned/fake"
 )
@@ -24,8 +25,6 @@ func TestTLSRoutesReconciler_TrafficRouting(t *testing.T) {
 		cluster            *capiv2.Cluster
 		existingTLSRoutes  []runtime.Object
 		expectedTLSRoutes  int
-		expectedHosts      []string
-		expectedBackends   []string
 		expectError        bool
 	}{
 		{
@@ -62,15 +61,7 @@ func TestTLSRoutesReconciler_TrafficRouting(t *testing.T) {
 				},
 			},
 			expectedTLSRoutes: 2,
-			expectedHosts: []string{
-				"api.test-cluster.example.com",
-				"konnectivity.test-cluster.example.com",
-			},
-			expectedBackends: []string{
-				"test-cluster",
-				"test-cluster",
-			},
-			expectError: false,
+			expectError:       false,
 		},
 		{
 			name: "TLS routes update existing routes gracefully",
@@ -106,15 +97,15 @@ func TestTLSRoutesReconciler_TrafficRouting(t *testing.T) {
 				},
 			},
 			existingTLSRoutes: []runtime.Object{
-				&gwv1alpha2.TLSRoute{
+				&gwv1.TLSRoute{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "test-cluster-api",
 						Namespace: "default",
 					},
-					Spec: gwv1alpha2.TLSRouteSpec{
-						Hostnames: []gwv1alpha2.Hostname{"old.api.example.com"},
+					Spec: gwv1.TLSRouteSpec{
+						Hostnames: []gwv1.Hostname{"old.api.example.com"},
 					},
-					Status: gwv1alpha2.TLSRouteStatus{
+					Status: gwv1.TLSRouteStatus{
 						RouteStatus: gwv1.RouteStatus{
 							Parents: []gwv1.RouteParentStatus{
 								{
@@ -140,7 +131,7 @@ func TestTLSRoutesReconciler_TrafficRouting(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			g := NewWithT(t)
+			g, _, _ := G(t)
 			gatewayClient := fake.NewClientset(tt.existingTLSRoutes...)
 
 			reconciler := &tlsRoutesReconciler{
@@ -154,6 +145,7 @@ func TestTLSRoutesReconciler_TrafficRouting(t *testing.T) {
 				tt.cluster,
 				tt.hostedControlPlane,
 				tt.cluster.Spec.ControlPlaneEndpoint.Host,
+				names.GetServiceName(tt.cluster),
 				reconciler.apiServerServicePort,
 			)
 
@@ -176,7 +168,7 @@ func TestTLSRoutesReconciler_TrafficRouting(t *testing.T) {
 					ContainElement(
 						HaveField("BackendObjectReferenceApplyConfiguration",
 							MatchFields(IgnoreExtras, Fields{
-								"Name": PointTo(Equal(gwv1.ObjectName("s-test-cluster"))),
+								"Name": PointTo(Equal(gwv1.ObjectName(names.GetServiceName(tt.cluster)))),
 								"Port": PointTo(Equal(gwv1.PortNumber(443))),
 							}),
 						),
@@ -185,21 +177,22 @@ func TestTLSRoutesReconciler_TrafficRouting(t *testing.T) {
 			))
 
 			konnectivityTLSRoute := reconciler.createTLSRoute(
-				"test-cluster-konnectivity",
+				names.GetKonnectivityTLSRouteName(tt.cluster),
 				tt.cluster,
 				tt.hostedControlPlane,
-				"konnectivity.test-cluster.example.com",
+				names.GetKonnectivityServerHost(tt.cluster),
+				names.GetKonnectivityServiceName(tt.cluster),
 				reconciler.konnectivityServicePort,
 			)
 
 			g.Expect(konnectivityTLSRoute).NotTo(BeNil())
-			g.Expect(*konnectivityTLSRoute.Name).To(Equal("test-cluster-konnectivity"))
+			g.Expect(*konnectivityTLSRoute.Name).To(Equal(names.GetKonnectivityTLSRouteName(tt.cluster)))
 			g.Expect(konnectivityTLSRoute.Spec.Rules).To(ContainElement(
 				HaveField("BackendRefs",
 					ContainElement(
 						HaveField("BackendObjectReferenceApplyConfiguration",
 							MatchFields(IgnoreExtras, Fields{
-								"Name": PointTo(Equal(gwv1.ObjectName("s-test-cluster"))),
+								"Name": PointTo(Equal(gwv1.ObjectName(names.GetKonnectivityServiceName(tt.cluster)))),
 								"Port": PointTo(Equal(gwv1.PortNumber(8132))),
 							}),
 						),
@@ -262,7 +255,7 @@ func TestTLSRoutesReconciler_CertificateIntegration(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			g := NewWithT(t)
+			g, _, _ := G(t)
 			gatewayClient := fake.NewClientset()
 
 			reconciler := &tlsRoutesReconciler{
@@ -276,6 +269,7 @@ func TestTLSRoutesReconciler_CertificateIntegration(t *testing.T) {
 				tt.cluster,
 				tt.hostedControlPlane,
 				tt.cluster.Spec.ControlPlaneEndpoint.Host,
+				names.GetServiceName(tt.cluster),
 				reconciler.apiServerServicePort,
 			)
 
@@ -373,7 +367,7 @@ func TestTLSRoutesReconciler_GatewayFailover(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			g := NewWithT(t)
+			g, _, _ := G(t)
 			gatewayClient := fake.NewClientset()
 
 			reconciler := &tlsRoutesReconciler{
@@ -387,6 +381,7 @@ func TestTLSRoutesReconciler_GatewayFailover(t *testing.T) {
 				tt.cluster,
 				tt.hostedControlPlane,
 				tt.cluster.Spec.ControlPlaneEndpoint.Host,
+				names.GetServiceName(tt.cluster),
 				reconciler.apiServerServicePort,
 			)
 
@@ -403,7 +398,7 @@ func TestTLSRoutesReconciler_GatewayFailover(t *testing.T) {
 }
 
 func TestTLSRoutesReconciler_MultipleEndpoints(t *testing.T) {
-	g := NewWithT(t)
+	g, _, _ := G(t)
 	hostedControlPlane := &v1alpha1.HostedControlPlane{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-hcp",
@@ -447,14 +442,16 @@ func TestTLSRoutesReconciler_MultipleEndpoints(t *testing.T) {
 		cluster,
 		hostedControlPlane,
 		cluster.Spec.ControlPlaneEndpoint.Host,
+		names.GetServiceName(cluster),
 		reconciler.apiServerServicePort,
 	)
 
 	konnectivityTLSRoute := reconciler.createTLSRoute(
-		"test-cluster-konnectivity",
+		names.GetKonnectivityTLSRouteName(cluster),
 		cluster,
 		hostedControlPlane,
-		"konnectivity.test-cluster.example.com",
+		names.GetKonnectivityServerHost(cluster),
+		names.GetKonnectivityServiceName(cluster),
 		reconciler.konnectivityServicePort,
 	)
 
@@ -480,7 +477,7 @@ func TestTLSRoutesReconciler_MultipleEndpoints(t *testing.T) {
 			ContainElement(
 				HaveField("BackendObjectReferenceApplyConfiguration",
 					MatchFields(IgnoreExtras, Fields{
-						"Name": PointTo(Equal(*apiBackendRef.Name)),
+						"Name": PointTo(Equal(gwv1.ObjectName(names.GetKonnectivityServiceName(cluster)))),
 						"Port": PointTo(Equal(gwv1.PortNumber(8132))),
 					}),
 				),

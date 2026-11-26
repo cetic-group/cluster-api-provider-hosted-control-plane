@@ -14,7 +14,6 @@ import (
 	errorsUtil "github.com/teutonet/cluster-api-provider-hosted-control-plane/pkg/util/errors"
 	"github.com/teutonet/cluster-api-provider-hosted-control-plane/pkg/util/tracing"
 	"go.opentelemetry.io/otel/trace"
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/clientcmd/api"
@@ -24,7 +23,6 @@ import (
 	kubeadmv1beta4 "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/v1beta4"
 	konstants "k8s.io/kubernetes/cmd/kubeadm/app/constants"
 	"k8s.io/kubernetes/cmd/kubeadm/app/util/config"
-	kubeletv1beta1 "k8s.io/kubernetes/pkg/kubelet/apis/config/v1beta1"
 	capiv2 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 )
 
@@ -49,8 +47,8 @@ func NewConfigReconciler(
 	caCertificateDuration time.Duration,
 	certificateDuration time.Duration,
 	serviceDomain string,
-	serviceCIDR string,
-	podCIDR string,
+	serviceCIDR net.IPNet,
+	podCIDR net.IPNet,
 	dnsIP net.IP,
 	kubeadmConfigConfigMapName string,
 	kubeadmConfigConfigMapNamespace string,
@@ -84,8 +82,8 @@ type configReconciler struct {
 	caCertificateDuration           time.Duration
 	certificateDuration             time.Duration
 	serviceDomain                   string
-	serviceCIDR                     string
-	podCIDR                         string
+	serviceCIDR                     net.IPNet
+	podCIDR                         net.IPNet
 	dnsIP                           net.IP
 	kubeadmConfigConfigMapName      string
 	kubeadmConfigConfigMapNamespace string
@@ -105,15 +103,15 @@ func (cr *configReconciler) ReconcileClusterInfoConfigMap(
 	return tracing.WithSpan1(ctx, cr.Tracer, "ReconcileClusterInfoConfigMap",
 		func(ctx context.Context, span trace.Span) error {
 			caSecret, err := managementClient.CoreV1().Secrets(cluster.Namespace).
-				Get(ctx, names.GetCASecretName(cluster), metav1.GetOptions{})
+				Get(ctx, names.GetCABundleSecretName(cluster), metav1.GetOptions{})
 			if err != nil {
-				return fmt.Errorf("failed to get CA secret: %w", err)
+				return fmt.Errorf("failed to get CA bundle secret: %w", err)
 			}
 			kubeconfig := &api.Config{
 				Clusters: map[string]*api.Cluster{
 					"": {
 						Server:                   fmt.Sprintf("https://%s", cluster.Spec.ControlPlaneEndpoint.String()),
-						CertificateAuthorityData: caSecret.Data[corev1.TLSCertKey],
+						CertificateAuthorityData: caSecret.Data[konstants.CACertName],
 					},
 				},
 			}
@@ -150,8 +148,8 @@ func (cr *configReconciler) ReconcileKubeadmConfig(
 			conf := initConfiguration.ClusterConfiguration
 			conf.Networking = kubeadm.Networking{
 				DNSDomain:     cr.serviceDomain,
-				PodSubnet:     cr.podCIDR,
-				ServiceSubnet: cr.serviceCIDR,
+				PodSubnet:     cr.podCIDR.String(),
+				ServiceSubnet: cr.serviceCIDR.String(),
 			}
 			conf.CACertificateValidityPeriod = &metav1.Duration{Duration: cr.caCertificateDuration}
 			conf.CertificateValidityPeriod = &metav1.Duration{Duration: cr.certificateDuration}
@@ -184,8 +182,6 @@ func (cr *configReconciler) ReconcileKubeletConfig(
 	return tracing.WithSpan1(ctx, cr.Tracer, "reconcileKubeletConfig",
 		func(ctx context.Context, span trace.Span) error {
 			var kubeletConfiguration kubelettypes.KubeletConfiguration
-
-			kubeletv1beta1.SetDefaults_KubeletConfiguration(&kubeletConfiguration)
 
 			kubeletConfiguration.APIVersion = kubelettypes.SchemeGroupVersion.String()
 			kubeletConfiguration.Kind = "KubeletConfiguration"

@@ -11,9 +11,10 @@ import (
 	"net"
 	"net/url"
 	"path"
-	"sort"
+	stdslices "slices"
 	"strconv"
 	"strings"
+	"time"
 
 	ciliumclient "github.com/cilium/cilium/pkg/k8s/client/clientset/versioned"
 	slices "github.com/samber/lo"
@@ -44,6 +45,18 @@ import (
 	capisecretutil "sigs.k8s.io/cluster-api/util/secret"
 )
 
+const caBundleCertName = "bundle.crt"
+
+const kubeconfigFlag = "kubeconfig"
+
+const shutdownDelayDurationFlag = "shutdown-delay-duration"
+
+// kube-apiserver closes its listener within milliseconds of SIGTERM, but the endpoint slices, the load balancer and
+// the gateway need a bit more than a second to stop routing to the pod. Without a delay every rollout fails the
+// requests that are routed to a pod that no longer listens. During the delay the apiserver keeps serving (and fails
+// /readyz).
+const defaultShutdownDelayDuration = 10 * time.Second
+
 var (
 	errWebhookSecretIsMissingKey     = errors.New("webhook authentication secret is missing key")
 	errRootCAConfigMapMissingCertKey = errors.New(
@@ -71,8 +84,8 @@ func NewApiServerResourcesReconciler(
 	managementClusterClient *alias.ManagementClusterClient,
 	ciliumClient ciliumclient.Interface,
 	worldComponent string,
-	serviceCIDR string,
-	podCIDR string,
+	serviceCIDR net.IPNet,
+	podCIDR net.IPNet,
 	apiServerComponentLabel string,
 	apiServerServicePort int32,
 	apiServerServiceLegacyPortName string,
@@ -126,8 +139,8 @@ func NewApiServerResourcesReconciler(
 type apiServerResourcesReconciler struct {
 	reconcilers.ManagementResourceReconciler
 	worldComponent                      string
-	serviceCIDR                         string
-	podCIDR                             string
+	serviceCIDR                         net.IPNet
+	podCIDR                             net.IPNet
 	apiServerServicePort                int32
 	apiServerServiceLegacyPortName      string
 	etcdComponentLabel                  string
@@ -382,6 +395,9 @@ func (arr *apiServerResourcesReconciler) reconcileAuthenticationConfig(
 					},
 				),
 			}
+			stdslices.SortFunc(authConfig.JWT, func(left, right apiserverv1.JWTAuthenticator) int {
+				return strings.Compare(left.Issuer.URL, right.Issuer.URL)
+			})
 
 			configYAML, err := operatorutil.ToYaml(authConfig)
 			if err != nil {
@@ -704,6 +720,27 @@ func (arr *apiServerResourcesReconciler) ReconcileApiServerService(
 				WithPort(6443).
 				WithTargetPort(*apiPort.TargetPort).
 				WithProtocol(*apiPort.Protocol)
+			if _, ready, err := arr.ReconcileService(
+				ctx,
+				hostedControlPlane,
+				cluster,
+				hostedControlPlane.Namespace,
+				names.GetKonnectivityServiceName(cluster),
+				corev1.ServiceTypeClusterIP,
+				true,
+				arr.componentAPIServer,
+				[]*corev1ac.ServicePortApplyConfiguration{
+					corev1ac.ServicePort().
+						WithName("konnectivity").
+						WithPort(arr.konnectivityServicePort).
+						WithTargetPort(arr.konnectivityContainerPortName).
+						WithProtocol(corev1.ProtocolTCP),
+				},
+			); err != nil {
+				return "", err
+			} else if !ready {
+				return "Konnectivity Service is not ready", nil
+			}
 			if service, ready, err := arr.ReconcileService(
 				ctx,
 				hostedControlPlane,
@@ -835,18 +872,18 @@ func (arr *apiServerResourcesReconciler) createAPIServerCertificatesVolume(
 		WithProjected(corev1ac.ProjectedVolumeSource().
 			WithSources(
 				corev1ac.VolumeProjection().WithSecret(corev1ac.SecretProjection().
-					WithName(names.GetCASecretName(cluster)).
+					WithName(names.GetCABundleSecretName(cluster)).
 					WithItems(
 						corev1ac.KeyToPath().
-							WithKey(corev1.TLSCertKey).
+							WithKey(konstants.CACertName).
 							WithPath(konstants.CACertName),
 					),
 				),
 				corev1ac.VolumeProjection().WithSecret(corev1ac.SecretProjection().
-					WithName(names.GetFrontProxyCASecretName(cluster)).
+					WithName(names.GetFrontProxyCABundleSecretName(cluster)).
 					WithItems(
 						corev1ac.KeyToPath().
-							WithKey(corev1.TLSCertKey).
+							WithKey(konstants.CACertName).
 							WithPath(konstants.FrontProxyCACertName),
 					),
 				),
@@ -895,10 +932,10 @@ func (arr *apiServerResourcesReconciler) createAPIServerCertificatesVolume(
 					),
 				),
 				corev1ac.VolumeProjection().WithSecret(corev1ac.SecretProjection().
-					WithName(names.GetEtcdCASecretName(cluster)).
+					WithName(names.GetEtcdCABundleSecretName(cluster)).
 					WithItems(
 						corev1ac.KeyToPath().
-							WithKey(corev1.TLSCertKey).
+							WithKey(konstants.CACertName).
 							WithPath(konstants.EtcdCACertName),
 					),
 				),
@@ -935,6 +972,14 @@ func (arr *apiServerResourcesReconciler) createControllerManagerCertificatesVolu
 		WithProjected(corev1ac.ProjectedVolumeSource().
 			WithSources(
 				corev1ac.VolumeProjection().WithSecret(corev1ac.SecretProjection().
+					WithName(names.GetCABundleSecretName(cluster)).
+					WithItems(
+						corev1ac.KeyToPath().
+							WithKey(konstants.CACertName).
+							WithPath(caBundleCertName),
+					),
+				),
+				corev1ac.VolumeProjection().WithSecret(corev1ac.SecretProjection().
 					WithName(names.GetCASecretName(cluster)).
 					WithItems(
 						corev1ac.KeyToPath().
@@ -946,10 +991,10 @@ func (arr *apiServerResourcesReconciler) createControllerManagerCertificatesVolu
 					),
 				),
 				corev1ac.VolumeProjection().WithSecret(corev1ac.SecretProjection().
-					WithName(names.GetFrontProxyCASecretName(cluster)).
+					WithName(names.GetFrontProxyCABundleSecretName(cluster)).
 					WithItems(
 						corev1ac.KeyToPath().
-							WithKey(corev1.TLSCertKey).
+							WithKey(konstants.CACertName).
 							WithPath(konstants.FrontProxyCACertName),
 					),
 				),
@@ -993,10 +1038,13 @@ func (arr *apiServerResourcesReconciler) buildAPIServerArgs(
 		),
 		"external-hostname":           cluster.Spec.ControlPlaneEndpoint.Host,
 		"advertise-address":           hostedControlPlane.Status.LegacyIP,
-		"allow-privileged":            "true",
+		"allow-privileged":            strconv.FormatBool(true),
 		"authorization-mode":          konstants.ModeNode + "," + konstants.ModeRBAC,
 		"client-ca-file":              path.Join(certificatesDir, konstants.CACertName),
-		"enable-bootstrap-token-auth": "true",
+		"enable-bootstrap-token-auth": strconv.FormatBool(true),
+		// all apiservers share one advertise address, so their lease reconciler would empty the kubernetes
+		// endpoints on every graceful shutdown; the "kubernetes service" phase owns them instead
+		"endpoint-reconciler-type": "none",
 		"egress-selector-config-file": path.Join(
 			egressSelectorConfigDir,
 			arr.egressSelectorConfigurationFileName,
@@ -1016,7 +1064,7 @@ func (arr *apiServerResourcesReconciler) buildAPIServerArgs(
 		"service-account-jwks-uri":           jwksURI,
 		"service-account-key-file":           path.Join(certificatesDir, konstants.ServiceAccountPublicKeyName),
 		"service-account-signing-key-file":   path.Join(certificatesDir, konstants.ServiceAccountPrivateKeyName),
-		"service-cluster-ip-range":           arr.serviceCIDR,
+		"service-cluster-ip-range":           arr.serviceCIDR.String(),
 		"tls-cert-file":                      path.Join(certificatesDir, konstants.APIServerCertName),
 		"tls-private-key-file":               path.Join(certificatesDir, konstants.APIServerKeyName),
 		"etcd-servers": fmt.Sprintf("https://%s",
@@ -1044,6 +1092,11 @@ func (arr *apiServerResourcesReconciler) buildAPIServerArgs(
 			args["audit-log-mode"] = mode
 			args["audit-log-path"] = "-"
 		}
+	}
+
+	// only a default: controller args win over user args, but the delay is a tuning knob users may need to change
+	if _, userSet := hostedControlPlane.Spec.Deployment.APIServer.Args[shutdownDelayDurationFlag]; !userSet {
+		args[shutdownDelayDurationFlag] = defaultShutdownDelayDuration.String()
 	}
 
 	return operatorutil.ArgsToSlice(
@@ -1143,7 +1196,7 @@ func (arr *apiServerResourcesReconciler) createAuditWebhookSidecarContainer(
 				"g": "daemon off;",
 				"c": *webhookConfigVolumeMount.MountPath,
 			},
-			operatorutil.ArgOption{Prefix: ptr.To("-"), Delimiter: ptr.To(" ")},
+			operatorutil.ArgOption{Prefix: new("-"), Delimiter: new(" ")},
 		)...).
 		WithResources(operatorutil.ResourceRequirementsToResourcesApplyConfiguration(auditConfig.Webhook.Resources)).
 		WithRestartPolicy(corev1.ContainerRestartPolicyAlways).
@@ -1166,17 +1219,19 @@ func (arr *apiServerResourcesReconciler) buildKonnectivityServerArgs(
 		"authentication-audience": arr.konnectivityServerAudience,
 		"cluster-cert":            path.Join(*konnectivityCertificatesVolumeMount.MountPath, corev1.TLSCertKey),
 		"cluster-key":             path.Join(*konnectivityCertificatesVolumeMount.MountPath, corev1.TLSPrivateKeyKey),
-		"kubeconfig": path.Join(
+		kubeconfigFlag: path.Join(
 			*konnectivityKubeconfigVolumeMount.MountPath,
 			arr.konnectivityKubeconfigFileName,
 		),
-		"enable-lease-controller": "true",
+		"enable-lease-controller": strconv.FormatBool(true),
 		"admin-port":              strconv.Itoa(int(*adminPort.ContainerPort)),
 		"agent-port":              strconv.Itoa(int(*konnectivityPort.ContainerPort)),
 		"health-port":             strconv.Itoa(int(*healthPort.ContainerPort)),
 		"server-port":             "0",
 		"uds-name":                path.Join(*konnectivityUDSVolumeMount.MountPath, arr.konnectivityUDSSocketName),
 		"mode":                    "grpc",
+		// lets agents keep dialing until they reached every server even if their lease informer is stale
+		"server-count": strconv.Itoa(int(hostedControlPlane.Spec.ReplicasOrDefault())),
 	}
 
 	return operatorutil.ArgsToSlice(
@@ -1345,7 +1400,7 @@ func (arr *apiServerResourcesReconciler) buildSchedulerArgs(
 	args := map[string]string{
 		"authentication-kubeconfig": kubeconfigPath,
 		"authorization-kubeconfig":  kubeconfigPath,
-		"kubeconfig":                kubeconfigPath,
+		kubeconfigFlag:              kubeconfigPath,
 		"bind-address":              "0.0.0.0",
 		"leader-elect":              strconv.FormatBool(leaderElect),
 	}
@@ -1374,10 +1429,10 @@ func (arr *apiServerResourcesReconciler) buildControllerManagerArgs(
 	enabledControllers := []string{"*", kubenames.BootstrapSignerController, kubenames.TokenCleanerController}
 	leaderElect := hostedControlPlane.Spec.Deployment.ControllerManager.ReplicaCount(1) > 1
 	args := map[string]string{
-		"cluster-cidr":                     arr.podCIDR,
+		"cluster-cidr":                     arr.podCIDR.String(),
 		"authentication-kubeconfig":        kubeconfigPath,
 		"authorization-kubeconfig":         kubeconfigPath,
-		"kubeconfig":                       kubeconfigPath,
+		kubeconfigFlag:                     kubeconfigPath,
 		"bind-address":                     "0.0.0.0",
 		"leader-elect":                     strconv.FormatBool(leaderElect),
 		"cluster-name":                     cluster.Name,
@@ -1386,9 +1441,9 @@ func (arr *apiServerResourcesReconciler) buildControllerManagerArgs(
 		"cluster-signing-key-file":         path.Join(certificatesDir, konstants.CAKeyName),
 		"controllers":                      strings.Join(enabledControllers, ","),
 		"requestheader-client-ca-file":     path.Join(certificatesDir, konstants.FrontProxyCACertName),
-		"root-ca-file":                     path.Join(certificatesDir, konstants.CACertName),
+		"root-ca-file":                     path.Join(certificatesDir, caBundleCertName),
 		"service-account-private-key-file": path.Join(certificatesDir, konstants.ServiceAccountPrivateKeyName),
-		"use-service-account-credentials":  "true",
+		"use-service-account-credentials":  strconv.FormatBool(true),
 	}
 
 	return operatorutil.ArgsToSlice(
@@ -1408,7 +1463,7 @@ func (arr *apiServerResourcesReconciler) setAuditWebhookPorts(
 			if err != nil {
 				return nil, err
 			}
-			return ptr.To(slices.T2(targetUrl.Hostname(), port)), nil
+			return new(slices.T2(targetUrl.Hostname(), port)), nil
 		})
 	if errs := slices.OmitByValues(hostPorts, []error{nil}); len(errs) > 0 {
 		return fmt.Errorf("failed to parse audit webhook target servers: %w", errors.Join(slices.Values(errs)...))
@@ -1544,7 +1599,9 @@ func (arr *apiServerResourcesReconciler) generateNginxConfig(
 	}
 
 	webhookTargets := slices.Keys(targets)
-	sort.Slice(webhookTargets, func(i, j int) bool { return webhookTargets[i].Url < webhookTargets[j].Url })
+	stdslices.SortFunc(webhookTargets, func(left, right webhookTarget) int {
+		return strings.Compare(left.Url, right.Url)
+	})
 	nginxConfigTemplateData := map[string]any{
 		"serverPort": arr.nginxPort,
 		"targets":    webhookTargets,

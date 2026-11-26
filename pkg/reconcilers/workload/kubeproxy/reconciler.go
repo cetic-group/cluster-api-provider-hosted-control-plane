@@ -3,6 +3,7 @@ package kubeproxy
 import (
 	"context"
 	"fmt"
+	"net"
 	"path"
 
 	ciliumclient "github.com/cilium/cilium/pkg/k8s/client/clientset/versioned"
@@ -46,7 +47,7 @@ type KubeProxyReconciler interface {
 func NewKubeProxyReconciler(
 	managementClusterClient *alias.WorkloadClusterClient,
 	ciliumClient ciliumclient.Interface,
-	podCIDR string,
+	podCIDR net.IPNet,
 ) KubeProxyReconciler {
 	return &kubeProxyReconciler{
 		WorkloadResourceReconciler: reconcilers.WorkloadResourceReconciler{
@@ -69,7 +70,7 @@ func NewKubeProxyReconciler(
 
 type kubeProxyReconciler struct {
 	reconcilers.WorkloadResourceReconciler
-	podCIDR                  string
+	podCIDR                  net.IPNet
 	kubeProxyNamespace       string
 	kubeProxyServiceAccount  string
 	kubeProxyConfigMapName   string
@@ -247,10 +248,11 @@ func (kr *kubeProxyReconciler) reconcileKubeProxyConfigMap(
 ) error {
 	return tracing.WithSpan1(ctx, kr.Tracer, "ReconcileKubeProxyConfigMap",
 		func(ctx context.Context, span trace.Span) error {
+			const defaultContextName = "default"
 			kubeconfigFileName := "kubeconfig.conf"
 			kubeconfig := &api.Config{
 				Clusters: map[string]*api.Cluster{
-					"default": {
+					defaultContextName: {
 						Server: fmt.Sprintf("https://%s", cluster.Spec.ControlPlaneEndpoint.String()),
 						CertificateAuthority: path.Join(
 							serviceaccountAdmission.DefaultAPITokenMountPath,
@@ -259,14 +261,14 @@ func (kr *kubeProxyReconciler) reconcileKubeProxyConfigMap(
 					},
 				},
 				Contexts: map[string]*api.Context{
-					"default": {
-						Cluster:  "default",
-						AuthInfo: "default",
+					defaultContextName: {
+						Cluster:  defaultContextName,
+						AuthInfo: defaultContextName,
 					},
 				},
-				CurrentContext: "default",
+				CurrentContext: defaultContextName,
 				AuthInfos: map[string]*api.AuthInfo{
-					"default": {
+					defaultContextName: {
 						TokenFile: path.Join(
 							serviceaccountAdmission.DefaultAPITokenMountPath,
 							corev1.ServiceAccountTokenKey,
@@ -279,7 +281,7 @@ func (kr *kubeProxyReconciler) reconcileKubeProxyConfigMap(
 				ClientConnection: componentbaseconfigalpha1.ClientConnectionConfiguration{
 					Kubeconfig: path.Join(kr.kubeProxyConfigMountPath, kubeconfigFileName),
 				},
-				ClusterCIDR:        kr.podCIDR,
+				ClusterCIDR:        kr.podCIDR.String(),
 				MetricsBindAddress: "0.0.0.0:10249",
 				NodePortAddresses:  []string{"primary"},
 			}

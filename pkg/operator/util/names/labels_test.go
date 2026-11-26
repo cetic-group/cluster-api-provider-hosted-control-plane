@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	. "github.com/onsi/gomega"
+	. "github.com/teutonet/cluster-api-provider-hosted-control-plane/test"
 	capiv2 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 )
 
@@ -80,7 +81,7 @@ func TestGetControlPlaneLabels(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			g := NewWithT(t)
+			g, _, _ := G(t)
 			cluster := &capiv2.Cluster{}
 			cluster.Name = tt.clusterName
 			result := GetControlPlaneLabels(cluster, tt.component)
@@ -144,7 +145,7 @@ func TestGetControlPlaneSelector(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			g := NewWithT(t)
+			g, _, _ := G(t)
 			cluster := &capiv2.Cluster{}
 			cluster.Name = tt.clusterName
 			result := GetControlPlaneSelector(cluster, tt.component)
@@ -162,11 +163,11 @@ func TestGetControlPlaneSelector(t *testing.T) {
 }
 
 func TestGetKubeconfigLabel(t *testing.T) {
-	g := NewWithT(t)
+	g, _, _ := G(t)
 	result := GetKubeconfigLabel()
 
 	g.Expect(result).To(HaveLen(1))
-	g.Expect(result).To(HaveKeyWithValue(KubeconfigLabel, "true"))
+	g.Expect(result).To(HaveKeyWithValue(KubeconfigLabel, KubeconfigLabelValue))
 }
 
 func TestGetKubeconfigUserLabel(t *testing.T) {
@@ -200,7 +201,7 @@ func TestGetKubeconfigUserLabel(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			g := NewWithT(t)
+			g, _, _ := G(t)
 			result := GetKubeconfigUserLabel(tt.username)
 			g.Expect(result).To(Equal(tt.expected))
 		})
@@ -217,7 +218,7 @@ func TestGetKubeconfigLabels(t *testing.T) {
 			name:     "basic username",
 			username: "ci-user",
 			expected: map[string]string{
-				KubeconfigLabel:         "true",
+				KubeconfigLabel:         KubeconfigLabelValue,
 				KubeconfigUsernameLabel: "ci-user",
 			},
 		},
@@ -225,7 +226,7 @@ func TestGetKubeconfigLabels(t *testing.T) {
 			name:     "monitoring user",
 			username: "monitoring",
 			expected: map[string]string{
-				KubeconfigLabel:         "true",
+				KubeconfigLabel:         KubeconfigLabelValue,
 				KubeconfigUsernameLabel: "monitoring",
 			},
 		},
@@ -233,7 +234,7 @@ func TestGetKubeconfigLabels(t *testing.T) {
 			name:     "username with special characters",
 			username: "backup-agent-v2",
 			expected: map[string]string{
-				KubeconfigLabel:         "true",
+				KubeconfigLabel:         KubeconfigLabelValue,
 				KubeconfigUsernameLabel: "backup-agent-v2",
 			},
 		},
@@ -241,7 +242,7 @@ func TestGetKubeconfigLabels(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			g := NewWithT(t)
+			g, _, _ := G(t)
 			result := GetKubeconfigLabels(tt.username)
 			g.Expect(result).To(Equal(tt.expected))
 		})
@@ -262,7 +263,7 @@ func TestGetControlPlaneLabelsSelectorConsistency(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run("consistency_"+tc.clusterName+"_"+tc.component, func(t *testing.T) {
-			g := NewWithT(t)
+			g, _, _ := G(t)
 			cluster := &capiv2.Cluster{}
 			cluster.Name = tc.clusterName
 

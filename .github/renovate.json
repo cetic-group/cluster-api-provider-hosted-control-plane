@@ -1,0 +1,77 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "postUpdateOptions": [
+    "gomodTidy"
+  ],
+  "automerge": true,
+  "platformAutomerge": true,
+  "dependencyDashboard": true,
+  "packageRules": [
+    {
+      "matchDatasources": [
+        "golang-version"
+      ],
+      "rangeStrategy": "bump"
+    },
+    {
+      "matchManagers": [
+        "gomod"
+      ],
+      "matchDepTypes": [
+        "indirect"
+      ],
+      "enabled": true,
+      "groupName": "indirect Go modules"
+    },
+    {
+      "matchDatasources": [
+        "go"
+      ],
+      "matchPackageNames": [
+        "k8s.io/**",
+        "sigs.k8s.io/controller-runtime"
+      ],
+      "groupName": "k8s.io Kubernetes modules"
+    },
+    {
+      "matchDatasources": [
+        "go"
+      ],
+      "matchPackageNames": [
+        "github.com/aws/**"
+      ],
+      "groupName": "AWS modules"
+    },
+    {
+      "matchDatasources": [
+        "go"
+      ],
+      "matchPackageNames": [
+        "go.opentelemetry.io/**"
+      ],
+      "groupName": "OpenTelemetry modules"
+    }
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/.*/"
+      ],
+      "matchStrings": [
+        "\"?(?<currentValue>[^\\s\"]+)\"?\\s*//\\s*renovate:\\s*datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)( registryUrl=(?<registryUrl>\\S+))?( extractVersion=(?<extractVersion>\\S+))?( versioning=(?<versioning>\\S+))?"
+      ]
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^taskfile\\.yaml$/"
+      ],
+      "matchStrings": [
+        "(?<depName>[\\w-]+):\\s+url: (?<packageName>\\S+?)(?:/cmd/[\\w-]+)?\\s+version: (?<currentValue>\\S+)"
+      ],
+      "datasourceTemplate": "go",
+      "extractVersionTemplate": "^v(?<version>.*)$"
+    }
+  ]
+}

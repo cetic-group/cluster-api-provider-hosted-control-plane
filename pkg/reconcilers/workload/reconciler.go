@@ -13,19 +13,26 @@ import (
 	"github.com/teutonet/cluster-api-provider-hosted-control-plane/pkg/reconcilers/workload/coredns"
 	"github.com/teutonet/cluster-api-provider-hosted-control-plane/pkg/reconcilers/workload/konnectivity"
 	"github.com/teutonet/cluster-api-provider-hosted-control-plane/pkg/reconcilers/workload/kubeproxy"
+	"github.com/teutonet/cluster-api-provider-hosted-control-plane/pkg/reconcilers/workload/kubernetesservice"
 	"github.com/teutonet/cluster-api-provider-hosted-control-plane/pkg/reconcilers/workload/rbac"
 	"github.com/teutonet/cluster-api-provider-hosted-control-plane/pkg/util/tracing"
 	"go.opentelemetry.io/otel/trace"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	bootstrapapi "k8s.io/cluster-bootstrap/token/api"
 	konstants "k8s.io/kubernetes/cmd/kubeadm/app/constants"
-	"k8s.io/utils/ptr"
 	capiv2 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	"sigs.k8s.io/cluster-api/util/conditions"
 )
 
 type WorkloadClusterReconciler interface {
 	ReconcileWorkloadClusterResources(
+		ctx context.Context,
+		hostedControlPlane *v1alpha1.HostedControlPlane,
+		cluster *capiv2.Cluster,
+	) (string, error)
+	// ReconcileKubernetesService keeps the workload cluster's kubernetes endpoints pointing at the load balancer.
+	// It is separate from ReconcileWorkloadClusterResources so it can run right after the apiserver rollout.
+	ReconcileKubernetesService(
 		ctx context.Context,
 		hostedControlPlane *v1alpha1.HostedControlPlane,
 		cluster *capiv2.Cluster,
@@ -38,15 +45,15 @@ func NewWorkloadClusterReconciler(
 	caCertificateDuration time.Duration,
 	certificateDuration time.Duration,
 	serviceDomain string,
-	serviceCIDR string,
-	podCIDR string,
+	serviceCIDR net.IPNet,
+	podCIDR net.IPNet,
 	dnsIP net.IP,
 	konnectivityNamespace string,
 	konnectivityServiceAccount string,
 	konnectivityServerAudience string,
 	konnectivityServicePort int32,
 ) WorkloadClusterReconciler {
-	return &workloadClusterReconciler{
+	return &workloadClusterReconciler{ //nolint:gosec // service account names, not credentials
 		managementClusterClient:             managementClusterClient,
 		workloadClusterClientFactory:        workloadClusterClientFactory,
 		caCertificateDuration:               caCertificateDuration,
@@ -76,8 +83,8 @@ type workloadClusterReconciler struct {
 	caCertificateDuration               time.Duration
 	certificateDuration                 time.Duration
 	serviceDomain                       string
-	serviceCIDR                         string
-	podCIDR                             string
+	serviceCIDR                         net.IPNet
+	podCIDR                             net.IPNet
 	dnsIP                               net.IP
 	konnectivityNamespace               string
 	konnectivityServiceAccount          string
@@ -95,6 +102,24 @@ type workloadClusterReconciler struct {
 
 var _ WorkloadClusterReconciler = &workloadClusterReconciler{}
 
+func (wr *workloadClusterReconciler) ReconcileKubernetesService(
+	ctx context.Context,
+	hostedControlPlane *v1alpha1.HostedControlPlane,
+	cluster *capiv2.Cluster,
+) (string, error) {
+	workloadClusterClient, _, err := wr.workloadClusterClientFactory(ctx, wr.managementClusterClient, cluster)
+	if err != nil {
+		return "", fmt.Errorf("failed to get workload cluster client: %w", err)
+	}
+
+	notReadyReason, err := kubernetesservice.NewKubernetesServiceReconciler(workloadClusterClient).
+		ReconcileKubernetesEndpoints(ctx, hostedControlPlane)
+	if err != nil {
+		return "", fmt.Errorf("failed to reconcile kubernetes service endpoints: %w", err)
+	}
+	return notReadyReason, nil
+}
+
 func (wr *workloadClusterReconciler) ReconcileWorkloadClusterResources(
 	ctx context.Context,
 	hostedControlPlane *v1alpha1.HostedControlPlane,
@@ -104,7 +129,7 @@ func (wr *workloadClusterReconciler) ReconcileWorkloadClusterResources(
 		func(ctx context.Context, span trace.Span) (string, error) {
 			type WorkloadPhase struct {
 				Reconcile    func(context.Context, *capiv2.Cluster) (string, error)
-				Condition    capiv2.ConditionType
+				Condition    string
 				FailedReason string
 				Name         string
 			}
@@ -243,7 +268,7 @@ func (wr *workloadClusterReconciler) ReconcileWorkloadClusterResources(
 					}); {
 				case err != nil:
 					conditions.Set(hostedControlPlane, metav1.Condition{
-						Type:    string(phase.Condition),
+						Type:    phase.Condition,
 						Status:  metav1.ConditionFalse,
 						Reason:  phase.FailedReason,
 						Message: fmt.Sprintf("Reconciling workload phase %s failed: %v", phase.Name, err),
@@ -251,7 +276,7 @@ func (wr *workloadClusterReconciler) ReconcileWorkloadClusterResources(
 					return "", err
 				case notReadyReason != "":
 					conditions.Set(hostedControlPlane, metav1.Condition{
-						Type:    string(phase.Condition),
+						Type:    phase.Condition,
 						Status:  metav1.ConditionFalse,
 						Reason:  notReadyReason,
 						Message: fmt.Sprintf("Reconciling workload phase %s not ready: %s", phase.Name, notReadyReason),
@@ -259,15 +284,13 @@ func (wr *workloadClusterReconciler) ReconcileWorkloadClusterResources(
 					return notReadyReason, nil
 				default:
 					conditions.Set(hostedControlPlane, metav1.Condition{
-						Type:    string(phase.Condition),
+						Type:    phase.Condition,
 						Status:  metav1.ConditionTrue,
 						Reason:  "ReconcileSucceeded",
 						Message: fmt.Sprintf("Workload phase %s reconciled successfully", phase.Name),
 					})
 				}
 			}
-
-			hostedControlPlane.Status.Initialization.ControlPlaneInitialized = ptr.To(true)
 
 			return "", nil
 		},

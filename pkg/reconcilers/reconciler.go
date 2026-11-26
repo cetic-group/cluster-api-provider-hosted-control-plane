@@ -1,12 +1,13 @@
 package reconcilers
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"net"
 	"regexp"
-	"sort"
+	stdslices "slices"
 	"strconv"
 
 	cilium "github.com/cilium/cilium/pkg/k8s/apis/cilium.io"
@@ -17,7 +18,7 @@ import (
 	"github.com/cilium/cilium/pkg/policy/api"
 	slices "github.com/samber/lo"
 	operatorutil "github.com/teutonet/cluster-api-provider-hosted-control-plane/pkg/operator/util"
-	"github.com/teutonet/cluster-api-provider-hosted-control-plane/pkg/operator/util/recorder"
+	"github.com/teutonet/cluster-api-provider-hosted-control-plane/pkg/operator/util/emit"
 	errorsUtil "github.com/teutonet/cluster-api-provider-hosted-control-plane/pkg/util/errors"
 	"github.com/teutonet/cluster-api-provider-hosted-control-plane/pkg/util/networkpolicy"
 	"github.com/teutonet/cluster-api-provider-hosted-control-plane/pkg/util/tracing"
@@ -41,7 +42,6 @@ import (
 	"k8s.io/kubernetes/pkg/controller/certificates/rootcacertpublisher"
 	"k8s.io/kubernetes/pkg/serviceaccount"
 	serviceaccountAdmission "k8s.io/kubernetes/plugin/pkg/admission/serviceaccount"
-	"k8s.io/utils/ptr"
 )
 
 var (
@@ -134,7 +134,7 @@ func reconcileWorkload[RA any, RSA any, R any](
 		if err := client.Delete(
 			ctx,
 			name,
-			metav1.DeleteOptions{PropagationPolicy: ptr.To(propagationPolicy)},
+			metav1.DeleteOptions{PropagationPolicy: new(propagationPolicy)},
 		); err != nil && !apierrors.IsNotFound(err) {
 			return nil, false, fmt.Errorf("failed to delete %s %s: %w", kind, name, err)
 		}
@@ -183,17 +183,20 @@ func reconcileWorkload[RA any, RSA any, R any](
 			if err := client.Delete(
 				ctx,
 				name,
-				metav1.DeleteOptions{PropagationPolicy: ptr.To(propagationPolicy)},
+				metav1.DeleteOptions{PropagationPolicy: new(propagationPolicy)},
 			); err != nil {
 				return nil, false, fmt.Errorf(
 					"failed to delete existing %s %s: %w", kind, name, err,
 				)
 			}
-			recorder.FromContext(ctx).Warnf(
+			emit.Warn(
+				ctx,
+				emit.SinkRecorder,
 				getObject(appliedResource),
 				"ImmutableSpecField",
 				fmt.Sprintf("Deleted%s", kind),
-				"Deleted existing %s %s due to immutable spec fields", kind, name,
+				"Deleted existing resource due to immutable spec fields",
+				"kind", kind, "name", name,
 			)
 			// don't retry immediately, the funcs might not be idempotent
 			// (and go can't figure out the generics anyways...)
@@ -690,8 +693,8 @@ func sortByPort[NPT any](
 	portLabels map[int32][]NPT,
 ) []slices.Entry[int32, []NPT] {
 	portLabelMappings := slices.ToPairs(portLabels)
-	sort.Slice(portLabelMappings, func(i, j int) bool {
-		return portLabelMappings[i].Key < portLabelMappings[j].Key
+	stdslices.SortFunc(portLabelMappings, func(left, right slices.Entry[int32, []NPT]) int {
+		return cmp.Compare(left.Key, right.Key)
 	})
 	return portLabelMappings
 }
@@ -901,17 +904,20 @@ func reconcileSecret(
 			if err := secretInterface.Delete(
 				ctx,
 				name,
-				metav1.DeleteOptions{PropagationPolicy: ptr.To(metav1.DeletePropagationBackground)},
+				metav1.DeleteOptions{PropagationPolicy: new(metav1.DeletePropagationBackground)},
 			); err != nil {
 				return fmt.Errorf(
 					"failed to delete existing secret %s: %w", name, err,
 				)
 			}
-			recorder.FromContext(ctx).Normalf(
+			emit.Info(
+				ctx,
+				emit.SinkRecorder,
 				appliedSecret,
 				"ImmutableTypeField",
 				"DeletedSecret",
-				"Deleted existing secret %s/%s due to immutable type field", namespace, name,
+				"Deleted existing secret due to immutable type field",
+				"namespace", namespace, "name", name,
 			)
 			return reconcileSecret(
 				ctx,
@@ -1264,6 +1270,9 @@ func convertToContainerApplyConfiguration(
 			WithSecurityContext(corev1ac.SecurityContext().
 				WithPrivileged(options.Root).
 				WithAllowPrivilegeEscalation(options.Root).
+				WithSeccompProfile(corev1ac.SeccompProfile().
+					WithType(corev1.SeccompProfileTypeRuntimeDefault),
+				).
 				WithReadOnlyRootFilesystem(!options.ReadWriteRootFilesystem).
 				WithRunAsUser(user).
 				WithRunAsGroup(user).

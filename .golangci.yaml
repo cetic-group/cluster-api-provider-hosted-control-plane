@@ -55,7 +55,6 @@ linters:
     - nolintlint
     - nosprintfhostport
     - perfsprint
-    - prealloc
     - predeclared
     - recvcheck
     - revive
@@ -114,6 +113,10 @@ linters:
           alias: policyv1
         - pkg: k8s.io/client-go/applyconfigurations/policy/v1
           alias: policyv1ac
+        - pkg: k8s.io/api/discovery/v1
+          alias: discoveryv1
+        - pkg: k8s.io/client-go/applyconfigurations/discovery/v1
+          alias: discoveryv1ac
         - pkg: k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1
           alias: apiextensionsv1
         - pkg: k8s.io/apimachinery/pkg/apis/meta/v1
@@ -144,6 +147,8 @@ linters:
           alias: kubeletv1beta1
         - pkg: k8s.io/kubelet/config/v1beta1
           alias: kubelettypes
+        - pkg: k8s.io/kubelet/pkg/apis/stats/v1alpha1
+          alias: kubeletstatsv1alpha1
         - pkg: k8s.io/kubernetes/cmd/kube-controller-manager/names
           alias: kubenames
         - pkg: k8s.io/client-go/tools/clientcmd/api/v1
@@ -213,12 +218,16 @@ linters:
         - pkg: github.com/cilium/cilium/pkg/k8s/client/clientset/versioned/typed/cilium.io/v2
           alias: ciliuminterfacev2
 
+        # Standard Library
+        - pkg: slices
+          alias: stdslices
+
         # Third Party Libraries
         - pkg: github.com/samber/lo
           alias: slices
         - pkg: github.com/blang/semver/v4
           alias: semver
-        - pkg: github.com/caarlos0/env/v6
+        - pkg: github.com/caarlos0/env/v11
           alias: env
         - pkg: go.etcd.io/etcd/client/v3
           alias: clientv3
@@ -262,6 +271,15 @@ linters:
         #   msg: Use slog instead
         - pattern: ^(record|events)\.NewFakeRecorder(For)?$
           msg: Use pkg/operator/util/recorder/fake_recorder.go instead.
+        - pattern: ^trace\.Span\.AddEvent$
+          msg: use emit.Warnf/Infof with SinkSpanEvent instead
+        - pattern: ^slog\.Logger\.(Warn|Info)Context$
+          msg: use emit.Warnf/emit.Infof instead
+        - pattern: ^recorder\.Recorder\.(Warnf|Normalf)$
+          msg: use emit.Warnf/emit.Infof instead
+        - pattern: ^(gomega\.)?NewWithT$
+          pkg: ^github\.com/onsi/gomega$
+          msg: use G() from the test package instead
     revive:
       rules:
         - name: exported
@@ -297,6 +315,9 @@ linters:
           - lll
         source: ".*https.*" # URLs are long 🤷
       - linters:
+          - lll
+        source: ".*// renovate:.*" # renovate markers are long
+      - linters:
           - importas
         text: 'has alias "" which is not' # Why the fuck aren't empty aliases allowed?!
       - linters:
@@ -326,6 +347,7 @@ linters:
           - importas
           - gosec
           - wrapcheck
+          - goconst
         path: *testFiles
       # Append should be able to assign to a different var/slice.
       #- linters:
@@ -336,6 +358,13 @@ linters:
           - gocritic
         text: "deferInLoop: Possible resource leak, 'defer' is called in the 'for' loop"
         path: *testFiles
+      - linters:
+          - forbidigo
+        path: pkg/operator/util/emit/emit\.go
+      # volume_stats_test cannot import the test package: test imports volume_stats (cycle)
+      - linters:
+          - forbidigo
+        path: pkg/reconcilers/etcd_cluster/volume_stats/volume_stats_test\.go
 
 run:
   timeout: 10m

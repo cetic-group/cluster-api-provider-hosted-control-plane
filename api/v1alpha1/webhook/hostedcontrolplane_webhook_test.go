@@ -2,13 +2,14 @@ package webhook
 
 import (
 	"testing"
+	"time"
 
 	. "github.com/onsi/gomega"
 	"github.com/teutonet/cluster-api-provider-hosted-control-plane/api/v1alpha1"
 	"github.com/teutonet/cluster-api-provider-hosted-control-plane/pkg/importcycle"
+	. "github.com/teutonet/cluster-api-provider-hosted-control-plane/test"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/utils/ptr"
 )
 
 func TestHostedControlPlaneWebhook_ValidateCreate(t *testing.T) {
@@ -29,14 +30,14 @@ func TestHostedControlPlaneWebhook_ValidateCreate(t *testing.T) {
 				},
 				Spec: v1alpha1.HostedControlPlaneSpec{
 					Version:  "v1.28.0",
-					Replicas: ptr.To[int32](3),
+					Replicas: new(int32(3)),
 					HostedControlPlaneInlineSpec: v1alpha1.HostedControlPlaneInlineSpec{
 						Gateway: v1alpha1.GatewayReference{
 							Name:      "test-gateway",
 							Namespace: "default",
 						},
 						ETCD: v1alpha1.ETCDComponent{
-							AutoGrow: ptr.To(true),
+							AutoGrow: new(true),
 						},
 					},
 				},
@@ -52,15 +53,15 @@ func TestHostedControlPlaneWebhook_ValidateCreate(t *testing.T) {
 				},
 				Spec: v1alpha1.HostedControlPlaneSpec{
 					Version:  "1.28.0",
-					Replicas: ptr.To[int32](1),
+					Replicas: new(int32(1)),
 					HostedControlPlaneInlineSpec: v1alpha1.HostedControlPlaneInlineSpec{
 						Gateway: v1alpha1.GatewayReference{
 							Name:      "test-gateway",
 							Namespace: "default",
 						},
 						ETCD: v1alpha1.ETCDComponent{
-							AutoGrow:   ptr.To(false),
-							VolumeSize: ptr.To(resource.MustParse("20Gi")),
+							AutoGrow:   new(false),
+							VolumeSize: new(resource.MustParse("20Gi")),
 						},
 					},
 				},
@@ -82,7 +83,7 @@ func TestHostedControlPlaneWebhook_ValidateCreate(t *testing.T) {
 							Namespace: "default",
 						},
 						ETCD: v1alpha1.ETCDComponent{
-							AutoGrow: ptr.To(true),
+							AutoGrow: new(true),
 						},
 					},
 				},
@@ -105,8 +106,8 @@ func TestHostedControlPlaneWebhook_ValidateCreate(t *testing.T) {
 							Namespace: "default",
 						},
 						ETCD: v1alpha1.ETCDComponent{
-							AutoGrow:   ptr.To(true),
-							VolumeSize: ptr.To(resource.MustParse("20Gi")),
+							AutoGrow:   new(true),
+							VolumeSize: new(resource.MustParse("20Gi")),
 						},
 					},
 				},
@@ -129,7 +130,7 @@ func TestHostedControlPlaneWebhook_ValidateCreate(t *testing.T) {
 							Namespace: "default",
 						},
 						ETCD: v1alpha1.ETCDComponent{
-							AutoGrow: ptr.To(false),
+							AutoGrow: new(false),
 						},
 					},
 				},
@@ -145,7 +146,7 @@ func TestHostedControlPlaneWebhook_ValidateCreate(t *testing.T) {
 					Version: "v1.28.0",
 					HostedControlPlaneInlineSpec: v1alpha1.HostedControlPlaneInlineSpec{
 						Gateway: v1alpha1.GatewayReference{Name: "test-gateway", Namespace: "default"},
-						ETCD:    v1alpha1.ETCDComponent{AutoGrow: ptr.To(true)},
+						ETCD:    v1alpha1.ETCDComponent{AutoGrow: new(true)},
 						OIDCProviders: map[string]v1alpha1.OIDCProvider{
 							importcycle.LocalClusterOIDCEndpoint: {
 								Audiences: []string{"my-app"},
@@ -168,7 +169,7 @@ func TestHostedControlPlaneWebhook_ValidateCreate(t *testing.T) {
 					Version: "v1.28.0",
 					HostedControlPlaneInlineSpec: v1alpha1.HostedControlPlaneInlineSpec{
 						Gateway: v1alpha1.GatewayReference{Name: "test-gateway", Namespace: "default"},
-						ETCD:    v1alpha1.ETCDComponent{AutoGrow: ptr.To(true)},
+						ETCD:    v1alpha1.ETCDComponent{AutoGrow: new(true)},
 						OIDCProviders: map[string]v1alpha1.OIDCProvider{
 							"https://oidc.example.com": {
 								Audiences: []string{"my-app"},
@@ -182,11 +183,84 @@ func TestHostedControlPlaneWebhook_ValidateCreate(t *testing.T) {
 			},
 			expectErr: false,
 		},
+		{
+			name: "root CA duration longer than intermediate CA duration - valid",
+			hcp: &v1alpha1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-hcp", Namespace: "default"},
+				Spec: v1alpha1.HostedControlPlaneSpec{
+					Version: "v1.28.0",
+					HostedControlPlaneInlineSpec: v1alpha1.HostedControlPlaneInlineSpec{
+						Gateway: v1alpha1.GatewayReference{Name: "test-gateway", Namespace: "default"},
+						ETCD:    v1alpha1.ETCDComponent{AutoGrow: new(true)},
+						Certificates: v1alpha1.CertificatesSpec{
+							RootCACertificateDuration: &metav1.Duration{Duration: 10 * 365 * 24 * time.Hour},
+							CACertificateDuration:     &metav1.Duration{Duration: 5 * 365 * 24 * time.Hour},
+						},
+					},
+				},
+			},
+			expectErr: false,
+		},
+		{
+			name: "root CA duration equal to intermediate CA duration - valid",
+			hcp: &v1alpha1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-hcp", Namespace: "default"},
+				Spec: v1alpha1.HostedControlPlaneSpec{
+					Version: "v1.28.0",
+					HostedControlPlaneInlineSpec: v1alpha1.HostedControlPlaneInlineSpec{
+						Gateway: v1alpha1.GatewayReference{Name: "test-gateway", Namespace: "default"},
+						ETCD:    v1alpha1.ETCDComponent{AutoGrow: new(true)},
+						Certificates: v1alpha1.CertificatesSpec{
+							RootCACertificateDuration: &metav1.Duration{Duration: 5 * 365 * 24 * time.Hour},
+							CACertificateDuration:     &metav1.Duration{Duration: 5 * 365 * 24 * time.Hour},
+						},
+					},
+				},
+			},
+			expectErr: false,
+		},
+		{
+			name: "root CA duration shorter than intermediate CA duration - invalid",
+			hcp: &v1alpha1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-hcp", Namespace: "default"},
+				Spec: v1alpha1.HostedControlPlaneSpec{
+					Version: "v1.28.0",
+					HostedControlPlaneInlineSpec: v1alpha1.HostedControlPlaneInlineSpec{
+						Gateway: v1alpha1.GatewayReference{Name: "test-gateway", Namespace: "default"},
+						ETCD:    v1alpha1.ETCDComponent{AutoGrow: new(true)},
+						Certificates: v1alpha1.CertificatesSpec{
+							RootCACertificateDuration: &metav1.Duration{Duration: 1 * 365 * 24 * time.Hour},
+							CACertificateDuration:     &metav1.Duration{Duration: 5 * 365 * 24 * time.Hour},
+						},
+					},
+				},
+			},
+			expectErr: true,
+			errMsg:    "rootCaCertificateDuration must be greater than or equal to caCertificateDuration",
+		},
+		{
+			name: "root CA duration set shorter than default intermediate CA duration - invalid",
+			hcp: &v1alpha1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-hcp", Namespace: "default"},
+				Spec: v1alpha1.HostedControlPlaneSpec{
+					Version: "v1.28.0",
+					HostedControlPlaneInlineSpec: v1alpha1.HostedControlPlaneInlineSpec{
+						Gateway: v1alpha1.GatewayReference{Name: "test-gateway", Namespace: "default"},
+						ETCD:    v1alpha1.ETCDComponent{AutoGrow: new(true)},
+						Certificates: v1alpha1.CertificatesSpec{
+							RootCACertificateDuration: &metav1.Duration{Duration: 24 * time.Hour},
+						},
+					},
+				},
+			},
+			expectErr: true,
+			errMsg:    "rootCaCertificateDuration must be greater than or equal to caCertificateDuration",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			g := NewWithT(t)
+			g, _, _ := G(t)
 			_, err := webhook.ValidateCreate(t.Context(), tt.hcp)
 
 			if tt.expectErr {
@@ -215,14 +289,14 @@ func TestHostedControlPlaneWebhook_ValidateUpdate(t *testing.T) {
 						Namespace: "default",
 					},
 					ETCD: v1alpha1.ETCDComponent{
-						AutoGrow: ptr.To(autoGrow),
+						AutoGrow: new(autoGrow),
 					},
 				},
 			},
 		}
 
 		if volumeSize != "" {
-			hcp.Spec.ETCD.VolumeSize = ptr.To(resource.MustParse(volumeSize))
+			hcp.Spec.ETCD.VolumeSize = new(resource.MustParse(volumeSize))
 		}
 
 		return hcp
@@ -318,7 +392,7 @@ func TestHostedControlPlaneWebhook_ValidateUpdate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			g := NewWithT(t)
+			g, _, _ := G(t)
 			_, err := webhook.ValidateUpdate(t.Context(), tt.oldHCP, tt.newHCP)
 
 			if tt.expectErr {
@@ -332,7 +406,7 @@ func TestHostedControlPlaneWebhook_ValidateUpdate(t *testing.T) {
 
 func TestHostedControlPlaneWebhook_ValidateDelete(t *testing.T) {
 	webhook := &hostedControlPlaneWebhook{}
-	g := NewWithT(t)
+	g, _, _ := G(t)
 
 	hcp := &v1alpha1.HostedControlPlane{
 		ObjectMeta: metav1.ObjectMeta{
@@ -386,7 +460,7 @@ func TestHostedControlPlaneWebhook_ParseVersion(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			g := NewWithT(t)
+			g, _, _ := G(t)
 			hcp := &v1alpha1.HostedControlPlane{
 				Spec: v1alpha1.HostedControlPlaneSpec{
 					Version: tt.version,

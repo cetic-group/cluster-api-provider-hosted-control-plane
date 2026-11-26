@@ -1,0 +1,32 @@
+publiccodeYmlVersion: 0.4.0
+
+name: Cluster API Control Plane Provider for Hosted Control Planes
+url: https://github.com/teutonet/cluster-api-provider-hosted-control-plane
+
+platforms:
+  - kubernetes
+
+developmentStatus: stable
+
+softwareType: standalone/backend
+
+description:
+  en:
+    shortDescription: >-
+      Cluster API control plane provider for managing hosted Kubernetes
+      control planes as first-class Kubernetes resources.
+
+legal:
+  # An additional permission applies, see LICENSE-EXCEPTION
+  # (AGPL-3.0-or-later WITH AdditionRef-HCP-Interface-Exception). The publiccode
+  # validator only accepts SPDX-listed exceptions, so only the base license is
+  # stated here.
+  license: AGPL-3.0-or-later
+
+maintenance:
+  type: internal
+
+localisation:
+  localisationReady: false
+  availableLanguages:
+    - en

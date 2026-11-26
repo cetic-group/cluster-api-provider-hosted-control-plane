@@ -20,7 +20,7 @@ jobs:
       sha: ${{ steps.release.outputs.sha }}
       upload_url: ${{ steps.release.outputs.upload_url }}
     steps:
-      - uses: googleapis/release-please-action@v4
+      - uses: googleapis/release-please-action@v5
         id: release
         with:
           token: ${{ secrets.ACTIONS_BOT_TOKEN }}
@@ -37,21 +37,26 @@ jobs:
     permissions:
       contents: write
       packages: write
+      id-token: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.release-please.outputs.sha }}
 
-      - uses: arduino/setup-task@v2
+      - uses: arduino/setup-task@v3.0.0
         with:
           version: 3.x
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version-file: ./go.mod
 
+      - uses: sigstore/cosign-installer@v4.1.3
+
       - name: Download last metadata
-        run: gh release download -p metadata.yaml $(gh release list --exclude-drafts --exclude-pre-releases --order desc --limit 1 --json tagName --jq '.[0].tagName')
+        run: |
+          mkdir -p build
+          gh release download -p metadata.yaml --dir build "$(gh release list --exclude-drafts --exclude-pre-releases --order desc --limit 1 --json tagName --jq '.[0].tagName')"
         continue-on-error: true
       - run: task build
 
@@ -59,7 +64,12 @@ jobs:
         run: |
           echo ${{ github.token }} | buildah login --username ${{ github.repository_owner }} --password-stdin ghcr.io
 
-      - run: buildah manifest push --all ${IMAGE}
+      - run: buildah manifest push --all --digestfile /tmp/digest "${IMAGE}"
+
+      - name: Sign image
+        run: |
+          echo ${{ github.token }} | cosign login --username ${{ github.repository_owner }} --password-stdin ghcr.io
+          cosign sign --yes "${IMAGE%%:*}@$(cat /tmp/digest)"
 
       - name: Upload manifests
         uses: actions/upload-release-asset@v1

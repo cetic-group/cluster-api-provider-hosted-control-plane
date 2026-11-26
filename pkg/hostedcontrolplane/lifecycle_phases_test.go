@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"testing"
+	"time"
 
 	certmanagerv1 "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
 	certmanagerv1ac "github.com/cert-manager/cert-manager/pkg/client/applyconfigurations/certmanager/v1"
@@ -19,12 +20,13 @@ import (
 	slices "github.com/samber/lo"
 	"github.com/teutonet/cluster-api-provider-hosted-control-plane/api/v1alpha1"
 	"github.com/teutonet/cluster-api-provider-hosted-control-plane/api/v1alpha1/webhook"
+	"github.com/teutonet/cluster-api-provider-hosted-control-plane/pkg/operator/util/names"
 	"github.com/teutonet/cluster-api-provider-hosted-control-plane/pkg/operator/util/recorder"
 	"github.com/teutonet/cluster-api-provider-hosted-control-plane/pkg/reconcilers/alias"
 	"github.com/teutonet/cluster-api-provider-hosted-control-plane/pkg/reconcilers/etcd_cluster/etcd_client"
 	"github.com/teutonet/cluster-api-provider-hosted-control-plane/pkg/reconcilers/etcd_cluster/s3_client"
 	. "github.com/teutonet/cluster-api-provider-hosted-control-plane/test"
-	clientv3 "go.etcd.io/etcd/client/v3"
+	. "github.com/teutonet/cluster-api-provider-hosted-control-plane/test/etcdtest"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -42,7 +44,6 @@ import (
 	"k8s.io/cluster-bootstrap/token/api"
 	konstants "k8s.io/kubernetes/cmd/kubeadm/app/constants"
 	"k8s.io/kubernetes/pkg/controller/certificates/rootcacertpublisher"
-	"k8s.io/utils/ptr"
 	capiv2 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	"sigs.k8s.io/cluster-api/util/conditions"
 	"sigs.k8s.io/cluster-api/util/contract"
@@ -52,7 +53,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	gwv1 "sigs.k8s.io/gateway-api/apis/v1"
 	v1 "sigs.k8s.io/gateway-api/applyconfiguration/apis/v1"
-	"sigs.k8s.io/gateway-api/applyconfiguration/apis/v1alpha2"
 	gwfake "sigs.k8s.io/gateway-api/pkg/client/clientset/versioned/fake"
 )
 
@@ -73,11 +73,11 @@ type testPhase struct {
 	patchCluster func()
 	// Function to simulate external systems BEFORE reconciliation
 	// (e.g., cert-manager creating secrets, marking resources as ready)
-	simulateExternalSystems func(ctx context.Context, g *WithT)
+	simulateExternalSystems func(ctx context.Context, g Gomega)
 	verifyConditionsBefore  map[bool][]types2.GomegaMatcher
 	verifyConditionsAfter   map[bool][]types2.GomegaMatcher
 	// Custom resource verifications AFTER reconciliation and simulation
-	verifyResources        func(ctx context.Context, g *WithT)
+	verifyResources        func(ctx context.Context, g Gomega)
 	expectError            string
 	expectNoGenerationBump bool
 }
@@ -110,7 +110,7 @@ func TestHostedControlPlane_FullLifecycle(t *testing.T) {
 		Level: slog.LevelError, // Set to LevelDebug for verbose output
 	}))
 	ctx := log.IntoContext(t.Context(), logger)
-	g := NewWithT(t)
+	g, _, _ := G(t)
 
 	scheme, err := NewScheme()
 	g.Expect(err).To(Succeed())
@@ -190,8 +190,8 @@ func TestHostedControlPlane_FullLifecycle(t *testing.T) {
 					Name:      "test-gateway",
 				},
 				ETCD: v1alpha1.ETCDComponent{
-					AutoGrow:   ptr.To(false),
-					VolumeSize: ptr.To(resource.MustParse("1Gi")),
+					AutoGrow:   new(false),
+					VolumeSize: new(resource.MustParse("1Gi")),
 				},
 			},
 		},
@@ -210,7 +210,7 @@ func TestHostedControlPlane_FullLifecycle(t *testing.T) {
 					Name:     "tls",
 					Protocol: gwv1.TLSProtocolType,
 					Port:     443,
-					Hostname: ptr.To(gwv1.Hostname("*.example.com")),
+					Hostname: new(gwv1.Hostname("*.example.com")),
 				},
 			},
 		},
@@ -246,6 +246,7 @@ func TestHostedControlPlane_FullLifecycle(t *testing.T) {
 	) (s3_client.S3Client, error) {
 		return NewS3ClientStub(), nil
 	}
+	volumeStatsStub := NewEtcdVolumeStatsProviderStub()
 	workloadClusterClientFactory := func(
 		_ context.Context,
 		_ *alias.ManagementClusterClient,
@@ -265,6 +266,7 @@ func TestHostedControlPlane_FullLifecycle(t *testing.T) {
 		workloadClusterClientFactory,
 		etcdClientFactory,
 		s3ClientFactory,
+		volumeStatsStub,
 		&recorder.InfiniteDiscardingFakeRecorder{},
 		"default",
 		"",
@@ -289,20 +291,21 @@ func TestHostedControlPlane_FullLifecycle(t *testing.T) {
 				},
 			},
 			expectNoGenerationBump: true,
-			verifyResources: func(ctx context.Context, g *WithT) {
+			verifyResources: func(ctx context.Context, g Gomega) {
 				g.Expect(hcp.Status.ObservedGeneration).To(BeNumerically("==", 0))
 			},
 		},
 		{
-			name: "Verify ExternalManagedControlPlane Status",
-			verifyResources: func(ctx context.Context, g *WithT) {
-				g.Expect(hcp.Status.ExternalManagedControlPlane).To(PointTo(BeTrue()))
+			name: "Add Finalizer",
+			verifyResources: func(ctx context.Context, g Gomega) {
+				g.Expect(hcp.Finalizers).To(ContainElement("hcp.controlplane.cluster.x-k8s.io"))
 			},
+			expectNoGenerationBump: true,
 		},
 		{
-			name: "Add Finalizer",
-			verifyResources: func(ctx context.Context, g *WithT) {
-				g.Expect(hcp.Finalizers).To(ContainElement("hcp.controlplane.cluster.x-k8s.io"))
+			name: "Verify ExternalManagedControlPlane Status",
+			verifyResources: func(ctx context.Context, g Gomega) {
+				g.Expect(hcp.Status.ExternalManagedControlPlane).To(PointTo(BeTrue()))
 			},
 		},
 		{
@@ -318,7 +321,7 @@ func TestHostedControlPlane_FullLifecycle(t *testing.T) {
 					),
 				},
 			},
-			simulateExternalSystems: makeIssuerReady(certManagerclient, cluster, "root"),
+			simulateExternalSystems: makeIssuerReady(certManagerclient, cluster, names.GetRootIssuerName(cluster)),
 			verifyConditionsAfter: map[bool][]types2.GomegaMatcher{
 				false: {
 					NewConditionVerification(
@@ -334,18 +337,18 @@ func TestHostedControlPlane_FullLifecycle(t *testing.T) {
 				false: {
 					NewConditionVerification(
 						v1alpha1.CACertificatesReadyCondition,
-						Equal("KubernetesCaCertificateNotReady"),
+						ContainSubstring("KubernetesCaCertificateNotReady"),
 					),
 				},
 			},
 			simulateExternalSystems: makeCertificateReady(
-				certManagerclient, managementClusterClient, hcp, cluster, "ca",
+				certManagerclient, managementClusterClient, hcp, cluster, names.GetCACertificateName(cluster),
 			),
 			verifyConditionsAfter: map[bool][]types2.GomegaMatcher{
 				false: {
 					NewConditionVerification(
 						v1alpha1.CACertificatesReadyCondition,
-						Not(Equal("KubernetesCaCertificateNotReady")),
+						Not(ContainSubstring("KubernetesCaCertificateNotReady")),
 					),
 				},
 			},
@@ -356,16 +359,16 @@ func TestHostedControlPlane_FullLifecycle(t *testing.T) {
 				false: {
 					NewConditionVerification(
 						v1alpha1.CACertificatesReadyCondition,
-						Equal("KubernetesCaIssuerNotReady"),
+						ContainSubstring("KubernetesCaIssuerNotReady"),
 					),
 				},
 			},
-			simulateExternalSystems: makeIssuerReady(certManagerclient, cluster, "ca"),
+			simulateExternalSystems: makeIssuerReady(certManagerclient, cluster, names.GetCAIssuerName(cluster)),
 			verifyConditionsAfter: map[bool][]types2.GomegaMatcher{
 				false: {
 					NewConditionVerification(
 						v1alpha1.CACertificatesReadyCondition,
-						Not(Equal("KubernetesCaIssuerNotReady")),
+						Not(ContainSubstring("KubernetesCaIssuerNotReady")),
 					),
 				},
 			},
@@ -383,9 +386,13 @@ func TestHostedControlPlane_FullLifecycle(t *testing.T) {
 					),
 				},
 			},
-			simulateExternalSystems: func(ctx context.Context, g *WithT) {
-				makeCertificateReady(certManagerclient, managementClusterClient, hcp, cluster, "etcd-ca")(ctx, g)
-				makeCertificateReady(certManagerclient, managementClusterClient, hcp, cluster, "front-proxy-ca")(ctx, g)
+			simulateExternalSystems: func(ctx context.Context, g Gomega) {
+				makeCertificateReady(
+					certManagerclient, managementClusterClient, hcp, cluster, names.GetEtcdCAName(cluster),
+				)(ctx, g)
+				makeCertificateReady(
+					certManagerclient, managementClusterClient, hcp, cluster, names.GetFrontProxyCAName(cluster),
+				)(ctx, g)
 			},
 			verifyConditionsAfter: map[bool][]types2.GomegaMatcher{
 				false: {
@@ -412,9 +419,9 @@ func TestHostedControlPlane_FullLifecycle(t *testing.T) {
 					),
 				},
 			},
-			simulateExternalSystems: func(ctx context.Context, g *WithT) {
-				makeIssuerReady(certManagerclient, cluster, "etcd-ca")(ctx, g)
-				makeIssuerReady(certManagerclient, cluster, "front-proxy-ca")(ctx, g)
+			simulateExternalSystems: func(ctx context.Context, g Gomega) {
+				makeIssuerReady(certManagerclient, cluster, names.GetEtcdCAName(cluster))(ctx, g)
+				makeIssuerReady(certManagerclient, cluster, names.GetFrontProxyCAName(cluster))(ctx, g)
 			},
 			verifyConditionsAfter: map[bool][]types2.GomegaMatcher{
 				true: {
@@ -437,7 +444,7 @@ func TestHostedControlPlane_FullLifecycle(t *testing.T) {
 					),
 				},
 			},
-			simulateExternalSystems: func(ctx context.Context, g *WithT) {
+			simulateExternalSystems: func(ctx context.Context, g Gomega) {
 				serviceInterface := managementClusterClient.CoreV1().Services(hcp.Namespace)
 				svc, err := serviceInterface.Get(ctx, fmt.Sprintf("s-%s", cluster.Name), metav1.GetOptions{})
 				g.Expect(err).To(Succeed())
@@ -465,7 +472,7 @@ func TestHostedControlPlane_FullLifecycle(t *testing.T) {
 					),
 				},
 			},
-			verifyResources: func(ctx context.Context, g *WithT) {
+			verifyResources: func(ctx context.Context, g Gomega) {
 				g.Expect(hcp.Status.LegacyIP).To(Equal("1.1.1.1"))
 			},
 		},
@@ -479,7 +486,7 @@ func TestHostedControlPlane_FullLifecycle(t *testing.T) {
 					),
 				},
 			},
-			simulateExternalSystems: func(ctx context.Context, g *WithT) {
+			simulateExternalSystems: func(ctx context.Context, g Gomega) {
 				endpoint, found, err := unstructured.NestedMap(infraCluster.Object, "spec", "controlPlaneEndpoint")
 				g.Expect(err).To(Succeed())
 				g.Expect(found).To(BeTrue())
@@ -501,44 +508,112 @@ func TestHostedControlPlane_FullLifecycle(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "Make Api Server TLS Route Ready",
+			verifyConditionsBefore: map[bool][]types2.GomegaMatcher{
+				false: {
+					NewConditionVerification(
+						v1alpha1.APIServerTLSRoutesReadyCondition,
+						Equal("ApiServerTlsRouteNotReady"),
+					),
+				},
+			},
+			simulateExternalSystems: makeTLSRouteReady(gatewayInterface, hcp, names.GetTLSRouteName(cluster)),
+			verifyConditionsAfter: map[bool][]types2.GomegaMatcher{
+				false: {
+					NewConditionVerification(
+						v1alpha1.APIServerTLSRoutesReadyCondition,
+						Not(Equal("ApiServerTlsRouteNotReady")),
+					),
+				},
+			},
+		},
+		{
+			name: "Make Konnectivity TLS Route Ready",
+			verifyConditionsBefore: map[bool][]types2.GomegaMatcher{
+				false: {
+					NewConditionVerification(
+						v1alpha1.APIServerTLSRoutesReadyCondition,
+						Equal("KonnectivityTlsRouteNotReady"),
+					),
+				},
+			},
+			simulateExternalSystems: makeTLSRouteReady(
+				gatewayInterface, hcp, names.GetKonnectivityTLSRouteName(cluster),
+			),
+			verifyConditionsAfter: map[bool][]types2.GomegaMatcher{
+				true: {
+					NewConditionVerification(
+						v1alpha1.APIServerTLSRoutesReadyCondition,
+					),
+				},
+			},
+		},
 	}...)
 
+	type certificatePhase struct {
+		name          string
+		certName      string
+		reasonMatcher string
+	}
 	phases = append(
 		phases,
-		slices.MapToSlice(map[string]string{
-			"admin":                    "CertificateAdminNotReady",
-			"controller-manager":       "CertificateControllerManagerNotReady",
-			"scheduler":                "CertificateSchedulerNotReady",
-			"konnectivity-client":      "CertificateKonnectivityClientNotReady",
-			"control-plane-controller": "CertificateControlPlaneControllerNotReady",
-			"apiserver":                "CertificateApiServerNotReady",
-			"apiserver-kubelet-client": "CertificateApiServerKubeletClientNotReady",
-			"front-proxy":              "CertificateFrontProxyNotReady",
-			"service-account":          "CertificateServiceAccountNotReady",
-			"etcd-server":              "CertificateEtcdServerNotReady",
-			"etcd-peer":                "CertificateEtcdPeerNotReady",
-			"etcd-apiserver-client":    "CertificateEtcdApiServerClientNotReady",
-		}, func(
-			name string, reasonMatcher string,
-		) testPhase {
+		slices.Map([]certificatePhase{
+			{"admin", names.GetAdminCertificateName(cluster), "CertificateAdminNotReady"},
+			{
+				"controller-manager",
+				names.GetControllerManagerKubeconfigCertificateName(cluster),
+				"CertificateControllerManagerNotReady",
+			},
+			{
+				"scheduler",
+				names.GetSchedulerKubeconfigCertificateName(cluster),
+				"CertificateSchedulerNotReady",
+			},
+			{
+				"konnectivity-client",
+				names.GetKonnectivityClientKubeconfigCertificateName(cluster),
+				"CertificateKonnectivityClientNotReady",
+			},
+			{
+				"control-plane-controller",
+				names.GetControlPlaneControllerKubeconfigCertificateName(cluster),
+				"CertificateControlPlaneControllerNotReady",
+			},
+			{"apiserver", names.GetAPIServerCertificateName(cluster), "CertificateApiServerNotReady"},
+			{
+				"apiserver-kubelet-client",
+				names.GetAPIServerKubeletClientCertificateName(cluster),
+				"CertificateApiServerKubeletClientNotReady",
+			},
+			{"front-proxy", names.GetFrontProxyCertificateName(cluster), "CertificateFrontProxyNotReady"},
+			{"service-account", names.GetServiceAccountCertificateName(cluster), "CertificateServiceAccountNotReady"},
+			{"etcd-server", names.GetEtcdServerCertificateName(cluster), "CertificateEtcdServerNotReady"},
+			{"etcd-peer", names.GetEtcdPeerCertificateName(cluster), "CertificateEtcdPeerNotReady"},
+			{
+				"etcd-apiserver-client",
+				names.GetEtcdAPIServerClientCertificateName(cluster),
+				"CertificateEtcdApiServerClientNotReady",
+			},
+		}, func(certificate certificatePhase, _ int) testPhase {
 			return testPhase{
-				name: fmt.Sprintf("Make %s Certificate Ready", slices.Capitalize(name)),
+				name: fmt.Sprintf("Make %s Certificate Ready", slices.Capitalize(certificate.name)),
 				verifyConditionsBefore: map[bool][]types2.GomegaMatcher{
 					false: {
 						NewConditionVerification(
 							v1alpha1.CertificatesReadyCondition,
-							ContainSubstring(reasonMatcher),
+							ContainSubstring(certificate.reasonMatcher),
 						),
 					},
 				},
 				simulateExternalSystems: makeCertificateReady(
-					certManagerclient, managementClusterClient, hcp, cluster, name,
+					certManagerclient, managementClusterClient, hcp, cluster, certificate.certName,
 				),
 				verifyConditionsAfter: map[bool][]types2.GomegaMatcher{
 					false: {
 						NewConditionVerification(
 							v1alpha1.CertificatesReadyCondition,
-							Not(ContainSubstring(reasonMatcher)),
+							Not(ContainSubstring(certificate.reasonMatcher)),
 						),
 					},
 				},
@@ -557,7 +632,8 @@ func TestHostedControlPlane_FullLifecycle(t *testing.T) {
 				},
 			},
 			simulateExternalSystems: makeCertificateReady(
-				certManagerclient, managementClusterClient, hcp, cluster, "etcd-controller-client",
+				certManagerclient, managementClusterClient, hcp, cluster,
+				names.GetEtcdControllerClientCertificateName(cluster),
 			),
 			verifyConditionsAfter: map[bool][]types2.GomegaMatcher{
 				true: {
@@ -565,36 +641,6 @@ func TestHostedControlPlane_FullLifecycle(t *testing.T) {
 						v1alpha1.CertificatesReadyCondition,
 					),
 				},
-			},
-		},
-		{
-			name: "Verify Kubeconfigs Were Created",
-			verifyConditionsAfter: map[bool][]types2.GomegaMatcher{
-				true: {
-					NewConditionVerification(
-						v1alpha1.KubeconfigReadyCondition,
-					),
-				},
-			},
-			verifyResources: func(ctx context.Context, g *WithT) {
-				secretInterface := managementClusterClient.CoreV1().Secrets(hcp.Namespace)
-				for _, name := range []string{
-					"admin",
-					"kube-controller-manager",
-					"kube-scheduler",
-					"konnectivity-client",
-					"control-plane-controller",
-				} {
-					kubeconfigName := fmt.Sprintf("%s-%s-kubeconfig", cluster.Name, name)
-					if name == "admin" {
-						kubeconfigName = fmt.Sprintf("%s-kubeconfig", cluster.Name)
-					}
-					g.Expect(secretInterface.Get(
-						ctx,
-						kubeconfigName,
-						metav1.GetOptions{},
-					)).Error().To(Succeed())
-				}
 			},
 		},
 		{
@@ -607,7 +653,7 @@ func TestHostedControlPlane_FullLifecycle(t *testing.T) {
 					),
 				},
 			},
-			simulateExternalSystems: func(ctx context.Context, g *WithT) {
+			simulateExternalSystems: func(ctx context.Context, g Gomega) {
 				serviceInterface := managementClusterClient.CoreV1().Services(hcp.Namespace)
 				service, err := serviceInterface.Get(
 					ctx,
@@ -645,11 +691,11 @@ func TestHostedControlPlane_FullLifecycle(t *testing.T) {
 					),
 				},
 			},
-			simulateExternalSystems: func(ctx context.Context, g *WithT) {
+			simulateExternalSystems: func(ctx context.Context, g Gomega) {
 				statefulSetInterface := managementClusterClient.AppsV1().StatefulSets(hcp.Namespace)
 				statefulSet, err := statefulSetInterface.Get(
 					ctx,
-					fmt.Sprintf("%s-etcd", cluster.Name),
+					names.GetEtcdStatefulSetName(cluster),
 					metav1.GetOptions{},
 				)
 				g.Expect(err).To(Succeed())
@@ -668,10 +714,10 @@ func TestHostedControlPlane_FullLifecycle(t *testing.T) {
 				)).Error().To(Succeed())
 			},
 			expectError: "statefulset offline",
-			verifyResources: func(ctx context.Context, g *WithT) {
+			verifyResources: func(ctx context.Context, g Gomega) {
 				g.Expect(hcp.Status.ETCDVolumeSize.Cmp(resource.MustParse("1Gi"))).To(Equal(0))
 				g.Expect(managementClusterClient.NetworkingV1().NetworkPolicies(hcp.Namespace).Get(
-					ctx, fmt.Sprintf("%s-etcd", cluster.Name), metav1.GetOptions{},
+					ctx, names.GetEtcdStatefulSetName(cluster), metav1.GetOptions{},
 				)).Error().To(Succeed())
 			},
 		},
@@ -685,20 +731,10 @@ func TestHostedControlPlane_FullLifecycle(t *testing.T) {
 					),
 				},
 			},
-			simulateExternalSystems: func(ctx context.Context, g *WithT) {
+			simulateExternalSystems: func(ctx context.Context, g Gomega) {
 				etcdClient.AlarmError = nil
 				etcdClient.StatusError = nil
-				etcdClient.StatusResponses = map[string]*clientv3.StatusResponse{
-					"etcd-0": {
-						DbSize: 1024,
-					},
-					"etcd-1": {
-						DbSize: 1024,
-					},
-					"etcd-2": {
-						DbSize: 2048,
-					},
-				}
+				volumeStatsStub.MaxUsage = 2048
 			},
 			verifyConditionsAfter: map[bool][]types2.GomegaMatcher{
 				true: {
@@ -707,26 +743,60 @@ func TestHostedControlPlane_FullLifecycle(t *testing.T) {
 					),
 				},
 			},
-			verifyResources: func(ctx context.Context, g *WithT) {
+			verifyResources: func(ctx context.Context, g Gomega) {
 				g.Expect(hcp.Status.ETCDVolumeUsage).To(EqualResource(resource.MustParse("2Ki")))
 			},
 		},
 		{
+			name: "Verify Internal Kubeconfigs Were Created",
+			verifyConditionsAfter: map[bool][]types2.GomegaMatcher{
+				true: {
+					NewConditionVerification(
+						v1alpha1.InternalKubeconfigReadyCondition,
+					),
+				},
+			},
+			verifyResources: func(ctx context.Context, g Gomega) {
+				secretInterface := managementClusterClient.CoreV1().Secrets(hcp.Namespace)
+				for _, name := range []string{
+					"kube-controller-manager",
+					"kube-scheduler",
+					"konnectivity-client",
+					"control-plane-controller",
+				} {
+					kubeconfigName := fmt.Sprintf("%s-%s-kubeconfig", cluster.Name, name)
+					g.Expect(secretInterface.Get(
+						ctx,
+						kubeconfigName,
+						metav1.GetOptions{},
+					)).Error().To(Succeed())
+				}
+
+				// the admin kubeconfig is only reconciled once the apiserver is ready
+				_, err := secretInterface.Get(
+					ctx,
+					fmt.Sprintf("%s-kubeconfig", cluster.Name),
+					metav1.GetOptions{},
+				)
+				g.Expect(err).To(MatchError(apierrors.IsNotFound, "IsNotFound"))
+			},
+		},
+		{
 			name: "Verify konnectivity Config",
-			verifyResources: func(ctx context.Context, g *WithT) {
+			verifyResources: func(ctx context.Context, g Gomega) {
 				g.Expect(managementClusterClient.CoreV1().ConfigMaps(hcp.Namespace).Get(
 					ctx,
-					fmt.Sprintf("%s-konnectivity", cluster.Name),
+					names.GetKonnectivityConfigMapName(cluster),
 					metav1.GetOptions{},
 				)).Error().To(Succeed())
 			},
 		},
 		{
 			name: "Verify no audit Config",
-			verifyResources: func(ctx context.Context, g *WithT) {
+			verifyResources: func(ctx context.Context, g Gomega) {
 				_, err := managementClusterClient.CoreV1().Secrets(hcp.Namespace).Get(
 					ctx,
-					fmt.Sprintf("%s-audit", cluster.Name),
+					names.GetAuditWebhookSecretName(cluster),
 					metav1.GetOptions{},
 				)
 				g.Expect(err).To(MatchError(apierrors.IsNotFound, "IsNotFound"))
@@ -800,53 +870,34 @@ func TestHostedControlPlane_FullLifecycle(t *testing.T) {
 					NewConditionVerification(
 						v1alpha1.APIServerDeploymentsReadyCondition,
 					),
-				},
-			},
-		},
-		{
-			name: "Make Api Server TLS Route Ready",
-			verifyConditionsBefore: map[bool][]types2.GomegaMatcher{
-				false: {
 					NewConditionVerification(
-						v1alpha1.APIServerTLSRoutesReadyCondition,
-						Equal("ApiServerTlsRouteNotReady"),
+						v1alpha1.AdminKubeconfigReadyCondition,
 					),
 				},
 			},
-			simulateExternalSystems: makeTLSRouteReady(gatewayInterface, hcp, cluster.Name),
-			verifyConditionsAfter: map[bool][]types2.GomegaMatcher{
-				false: {
-					NewConditionVerification(
-						v1alpha1.APIServerTLSRoutesReadyCondition,
-						Not(Equal("ApiServerTlsRouteNotReady")),
-					),
-				},
-			},
-		},
-		{
-			name: "Make Konnectivity TLS Route Ready",
-			verifyConditionsBefore: map[bool][]types2.GomegaMatcher{
-				false: {
-					NewConditionVerification(
-						v1alpha1.APIServerTLSRoutesReadyCondition,
-						Equal("KonnectivityTlsRouteNotReady"),
-					),
-				},
-			},
-			simulateExternalSystems: makeTLSRouteReady(
-				gatewayInterface, hcp, fmt.Sprintf("%s-konnectivity", cluster.Name),
-			),
-			verifyConditionsAfter: map[bool][]types2.GomegaMatcher{
-				true: {
-					NewConditionVerification(
-						v1alpha1.APIServerTLSRoutesReadyCondition,
-					),
-				},
+			verifyResources: func(ctx context.Context, g Gomega) {
+				g.Expect(*hcp.Status.Initialization.ControlPlaneInitialized).To(BeTrue())
+
+				// the apiserver is now ready, so its kubernetes endpoints must point at the load balancer
+				slice, err := workloadClusterClient.DiscoveryV1().EndpointSlices(metav1.NamespaceDefault).
+					Get(ctx, "kubernetes", metav1.GetOptions{})
+				g.Expect(err).To(Succeed())
+				g.Expect(slice.Endpoints).To(HaveLen(1))
+				g.Expect(slice.Endpoints[0].Addresses).To(ConsistOf(hcp.Status.LegacyIP))
+				g.Expect(slice.Ports).To(HaveLen(1))
+				g.Expect(slice.Ports[0].Port).To(PointTo(Equal(int32(konstants.KubeAPIServerPort))))
+
+				// and the admin kubeconfig must have been reconciled
+				g.Expect(managementClusterClient.CoreV1().Secrets(hcp.Namespace).Get(
+					ctx,
+					fmt.Sprintf("%s-kubeconfig", cluster.Name),
+					metav1.GetOptions{},
+				)).Error().To(Succeed())
 			},
 		},
 		{
 			name: "Verify Metadata ConfigMaps exist",
-			verifyResources: func(ctx context.Context, g *WithT) {
+			verifyResources: func(ctx context.Context, g Gomega) {
 				coreV1Interface := workloadClusterClient.CoreV1()
 				g.Expect(coreV1Interface.ConfigMaps(metav1.NamespacePublic).Get(ctx,
 					api.ConfigMapClusterInfo, metav1.GetOptions{}),
@@ -861,7 +912,7 @@ func TestHostedControlPlane_FullLifecycle(t *testing.T) {
 		},
 		{
 			name: "Verify CoreDNS Deployment is scaled to 1",
-			verifyResources: func(ctx context.Context, g *WithT) {
+			verifyResources: func(ctx context.Context, g Gomega) {
 				deploymentInterface := workloadClusterClient.AppsV1().Deployments(metav1.NamespaceSystem)
 				deployment, err := deploymentInterface.Get(ctx, "coredns", metav1.GetOptions{})
 				g.Expect(err).To(Succeed())
@@ -897,7 +948,7 @@ func TestHostedControlPlane_FullLifecycle(t *testing.T) {
 		},
 		{
 			name: "Verify Konnectivity Deployment is scaled to 1",
-			verifyResources: func(ctx context.Context, g *WithT) {
+			verifyResources: func(ctx context.Context, g Gomega) {
 				deploymentInterface := workloadClusterClient.AppsV1().Deployments(metav1.NamespaceSystem)
 				deployment, err := deploymentInterface.Get(ctx, "konnectivity-agent", metav1.GetOptions{})
 				g.Expect(err).To(Succeed())
@@ -936,7 +987,7 @@ func TestHostedControlPlane_FullLifecycle(t *testing.T) {
 		},
 		{
 			name: "Add Node to Cluster",
-			simulateExternalSystems: func(ctx context.Context, g *WithT) {
+			simulateExternalSystems: func(ctx context.Context, g Gomega) {
 				g.Expect(workloadClusterClient.CoreV1().Nodes().Create(ctx, &corev1.Node{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "node-1",
@@ -958,7 +1009,7 @@ func TestHostedControlPlane_FullLifecycle(t *testing.T) {
 		},
 		{
 			name: "Verify CoreDNS and Konnectivity Agent Deployments are still scaled to 1",
-			verifyResources: func(ctx context.Context, g *WithT) {
+			verifyResources: func(ctx context.Context, g Gomega) {
 				deploymentInterface := workloadClusterClient.AppsV1().Deployments(metav1.NamespaceSystem)
 				for _, name := range []string{"coredns", "konnectivity-agent"} {
 					deployment, err := deploymentInterface.Get(ctx, name, metav1.GetOptions{})
@@ -969,7 +1020,7 @@ func TestHostedControlPlane_FullLifecycle(t *testing.T) {
 		},
 		{
 			name: "Make Kube Proxy Daemonset Ready",
-			simulateExternalSystems: func(ctx context.Context, g *WithT) {
+			simulateExternalSystems: func(ctx context.Context, g Gomega) {
 				daemonSetInterface := workloadClusterClient.AppsV1().DaemonSets(metav1.NamespaceSystem)
 				daemonSet, err := daemonSetInterface.Get(ctx, "kube-proxy", metav1.GetOptions{})
 				g.Expect(err).To(Succeed())
@@ -998,7 +1049,7 @@ func TestHostedControlPlane_FullLifecycle(t *testing.T) {
 		},
 		{
 			name: "Add 3 Nodes to Cluster",
-			simulateExternalSystems: func(ctx context.Context, g *WithT) {
+			simulateExternalSystems: func(ctx context.Context, g Gomega) {
 				slices.RepeatBy(3, func(i int) bool {
 					g.Expect(workloadClusterClient.CoreV1().Nodes().Create(ctx, &corev1.Node{
 						ObjectMeta: metav1.ObjectMeta{
@@ -1023,7 +1074,7 @@ func TestHostedControlPlane_FullLifecycle(t *testing.T) {
 					),
 				},
 			},
-			simulateExternalSystems: func(ctx context.Context, g *WithT) {
+			simulateExternalSystems: func(ctx context.Context, g Gomega) {
 				daemonSetInterface := workloadClusterClient.AppsV1().DaemonSets(metav1.NamespaceSystem)
 				daemonSet, err := daemonSetInterface.Get(ctx, "kube-proxy", metav1.GetOptions{})
 				g.Expect(err).To(Succeed())
@@ -1052,7 +1103,7 @@ func TestHostedControlPlane_FullLifecycle(t *testing.T) {
 		},
 		{
 			name: "Verify CoreDNS Deployment is scaled to 2",
-			verifyResources: func(ctx context.Context, g *WithT) {
+			verifyResources: func(ctx context.Context, g Gomega) {
 				deploymentInterface := workloadClusterClient.AppsV1().Deployments(metav1.NamespaceSystem)
 				corednsDeployment, err := deploymentInterface.Get(ctx, "coredns", metav1.GetOptions{})
 				g.Expect(err).To(Succeed())
@@ -1089,7 +1140,7 @@ func TestHostedControlPlane_FullLifecycle(t *testing.T) {
 		},
 		{
 			name: "Verify Konnectivity Agent Deployment is scaled to 2",
-			verifyResources: func(ctx context.Context, g *WithT) {
+			verifyResources: func(ctx context.Context, g Gomega) {
 				deploymentInterface := workloadClusterClient.AppsV1().Deployments(metav1.NamespaceSystem)
 				konnectivityDeployment, err := deploymentInterface.Get(ctx, "konnectivity-agent", metav1.GetOptions{})
 				g.Expect(err).To(Succeed())
@@ -1127,9 +1178,9 @@ func TestHostedControlPlane_FullLifecycle(t *testing.T) {
 		{
 			name: "Scale Up to 3 Replicas",
 			patchHCP: func() {
-				hcp.Spec.Replicas = ptr.To(int32(3))
+				hcp.Spec.Replicas = new(int32(3))
 			},
-			verifyResources: func(ctx context.Context, g *WithT) {
+			verifyResources: func(ctx context.Context, g Gomega) {
 				deploymentInterface := managementClusterClient.AppsV1().Deployments(hcp.Namespace)
 				apiServerDeployment, err := deploymentInterface.Get(
 					ctx,
@@ -1166,12 +1217,12 @@ func TestHostedControlPlane_FullLifecycle(t *testing.T) {
 		{
 			name: "Scale Up ETCD storage",
 			patchHCP: func() {
-				hcp.Spec.ETCD.VolumeSize = ptr.To(resource.MustParse("2Gi"))
+				hcp.Spec.ETCD.VolumeSize = new(resource.MustParse("2Gi"))
 			},
-			verifyResources: func(ctx context.Context, g *WithT) {
+			verifyResources: func(ctx context.Context, g Gomega) {
 				statefulSet, err := managementClusterClient.AppsV1().StatefulSets(hcp.Namespace).Get(
 					ctx,
-					fmt.Sprintf("%s-etcd", cluster.Name),
+					names.GetEtcdStatefulSetName(cluster),
 					metav1.GetOptions{},
 				)
 				g.Expect(err).To(Succeed())
@@ -1201,31 +1252,21 @@ func TestHostedControlPlane_FullLifecycle(t *testing.T) {
 			name: "Switch from Custom Etcd volume size to autogrow",
 			patchHCP: func() {
 				hcp.Spec.ETCD.VolumeSize = nil
-				hcp.Spec.ETCD.AutoGrow = ptr.To(true)
+				hcp.Spec.ETCD.AutoGrow = new(true)
 			},
 		},
 		{
 			name: "Let Etcd grow",
-			simulateExternalSystems: func(ctx context.Context, g *WithT) {
-				etcdClient.StatusResponses = map[string]*clientv3.StatusResponse{
-					"etcd-0": {
-						DbSize: ptr.To(resource.MustParse("1.5Gi")).Value(),
-					},
-					"etcd-1": {
-						DbSize: ptr.To(resource.MustParse("1Gi")).Value(),
-					},
-					"etcd-2": {
-						DbSize: ptr.To(resource.MustParse("500Mi")).Value(),
-					},
-				}
+			simulateExternalSystems: func(ctx context.Context, g Gomega) {
+				volumeStatsStub.MaxUsage = new(resource.MustParse("1.5Gi")).Value()
 			},
-			verifyResources: func(ctx context.Context, g *WithT) {
+			verifyResources: func(ctx context.Context, g Gomega) {
 				g.Expect(hcp.Status.ETCDVolumeUsage).To(EqualResource(resource.MustParse("1.5Gi")))
 			},
 		},
 		{
 			name: "Verify Etcd has been resized",
-			verifyResources: func(ctx context.Context, g *WithT) {
+			verifyResources: func(ctx context.Context, g Gomega) {
 				g.Expect(hcp.Status.ETCDVolumeSize).To(EqualResource(resource.MustParse("2Gi")))
 			},
 		},
@@ -1242,7 +1283,7 @@ func TestHostedControlPlane_FullLifecycle(t *testing.T) {
 					},
 				}
 			},
-			verifyResources: func(ctx context.Context, g *WithT) {
+			verifyResources: func(ctx context.Context, g Gomega) {
 				deploymentInterface := managementClusterClient.AppsV1().Deployments(hcp.Namespace)
 				deployment, err := deploymentInterface.Get(
 					ctx,
@@ -1273,7 +1314,7 @@ func TestHostedControlPlane_FullLifecycle(t *testing.T) {
 					},
 				}
 			},
-			verifyResources: func(ctx context.Context, g *WithT) {
+			verifyResources: func(ctx context.Context, g Gomega) {
 				deploymentInterface := managementClusterClient.AppsV1().Deployments(hcp.Namespace)
 				deployment, err := deploymentInterface.Get(
 					ctx,
@@ -1308,7 +1349,7 @@ func TestHostedControlPlane_FullLifecycle(t *testing.T) {
 					},
 				}
 			},
-			verifyResources: func(ctx context.Context, g *WithT) {
+			verifyResources: func(ctx context.Context, g Gomega) {
 				deploymentInterface := managementClusterClient.AppsV1().Deployments(hcp.Namespace)
 				deployment, err := deploymentInterface.Get(
 					ctx,
@@ -1407,7 +1448,8 @@ func TestHostedControlPlane_FullLifecycle(t *testing.T) {
 		v1alpha1.CACertificatesReadyCondition,
 		v1alpha1.CertificatesReadyCondition,
 		v1alpha1.APIServerServiceReadyCondition,
-		v1alpha1.KubeconfigReadyCondition,
+		v1alpha1.InternalKubeconfigReadyCondition,
+		v1alpha1.AdminKubeconfigReadyCondition,
 		v1alpha1.EtcdClusterReadyCondition,
 	}
 
@@ -1421,7 +1463,7 @@ func TestHostedControlPlane_FullLifecycle(t *testing.T) {
 	g.Expect(foundConditions).To(BeNumerically(">", 0), "Should have at least some conditions set")
 }
 
-func simulateK8sAPI(ctx context.Context, kubernetesClient kubernetes.Interface, g *WithT) {
+func simulateK8sAPI(ctx context.Context, kubernetesClient kubernetes.Interface, g Gomega) {
 	namespaces := []string{metav1.NamespaceSystem}
 	nodes, err := kubernetesClient.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
 	g.Expect(err).To(Succeed())
@@ -1487,8 +1529,8 @@ func simulateK8sAPI(ctx context.Context, kubernetesClient kubernetes.Interface, 
 	}
 }
 
-func verifyConditions(after map[bool][]types2.GomegaMatcher, hcp *v1alpha1.HostedControlPlane, g *WithT) {
-	for status, matchers := range after {
+func verifyConditions(conditionMatchers map[bool][]types2.GomegaMatcher, hcp *v1alpha1.HostedControlPlane, g Gomega) {
+	for status, matchers := range conditionMatchers {
 		conditionStatus := slices.Ternary(status, metav1.ConditionTrue, metav1.ConditionFalse)
 		partitionedConditions := slices.GroupBy(hcp.Status.Conditions,
 			func(condition metav1.Condition) bool {
@@ -1515,17 +1557,17 @@ func makeTLSRouteReady(
 	gatewayInterface *gwfake.Clientset,
 	hcp *v1alpha1.HostedControlPlane,
 	name string,
-) func(ctx context.Context, g *WithT) {
-	return func(ctx context.Context, g *WithT) {
-		tlsRouteInterface := gatewayInterface.GatewayV1alpha2().TLSRoutes(hcp.Namespace)
+) func(ctx context.Context, g Gomega) {
+	return func(ctx context.Context, g Gomega) {
+		tlsRouteInterface := gatewayInterface.GatewayV1().TLSRoutes(hcp.Namespace)
 		tlsRoute, err := tlsRouteInterface.Get(ctx, name, metav1.GetOptions{})
 		g.Expect(err).To(Succeed())
 
-		tlsRouteApplyConfiguration, err := v1alpha2.ExtractTLSRoute(tlsRoute, gatewayFieldManager)
+		tlsRouteApplyConfiguration, err := v1.ExtractTLSRoute(tlsRoute, gatewayFieldManager)
 		g.Expect(err).To(Succeed())
 		g.Expect(tlsRouteInterface.ApplyStatus(ctx,
 			tlsRouteApplyConfiguration.WithStatus(
-				v1alpha2.TLSRouteStatus().
+				v1.TLSRouteStatus().
 					WithParents(
 						v1.RouteParentStatus().
 							WithParentRef(
@@ -1549,8 +1591,8 @@ func makeDeploymentReady(
 	kubernetesInterface kubernetes.Interface,
 	namespace string,
 	name string,
-) func(ctx context.Context, g *WithT) {
-	return func(ctx context.Context, g *WithT) {
+) func(ctx context.Context, g Gomega) {
+	return func(ctx context.Context, g Gomega) {
 		deploymentInterface := kubernetesInterface.AppsV1().Deployments(namespace)
 		deployment, err := deploymentInterface.Get(ctx, name, metav1.GetOptions{})
 		g.Expect(err).To(Succeed())
@@ -1575,12 +1617,11 @@ func makeCertificateReady(
 	managementClusterClient *alias.ManagementClusterClient,
 	hcp *v1alpha1.HostedControlPlane,
 	cluster *capiv2.Cluster,
-	name string,
-) func(ctx context.Context, g *WithT) {
-	return func(ctx context.Context, g *WithT) {
+	certName string,
+) func(ctx context.Context, g Gomega) {
+	return func(ctx context.Context, g Gomega) {
 		certificatesInterface := certManagerClient.CertmanagerV1().Certificates(cluster.Namespace)
 		secretInterface := managementClusterClient.CoreV1().Secrets(hcp.Namespace)
-		certName := fmt.Sprintf("%s-%s", cluster.Name, name)
 		cert, err := certificatesInterface.Get(ctx, certName, metav1.GetOptions{})
 		g.Expect(err).To(Succeed())
 		certificateApplyConfiguration, err := certmanagerv1ac.ExtractCertificate(
@@ -1595,16 +1636,17 @@ func makeCertificateReady(
 						WithType(certmanagerv1.CertificateConditionReady).
 						WithStatus("True").
 						WithReason("Ready"),
-				),
+				).
+				WithNotBefore(metav1.Time{Time: time.Now()}),
 		), certManagerOptions)).Error().To(Succeed())
 
 		g.Expect(secretInterface.Apply(ctx,
 			corev1ac.Secret(cert.Spec.SecretName, hcp.Namespace).
 				WithData(
 					map[string][]byte{
-						"tls.crt": []byte(fmt.Sprintf("fake-%s-cert", name)),
-						"tls.key": []byte(fmt.Sprintf("fake-%s-key", name)),
-						"ca.crt":  []byte(fmt.Sprintf("fake-%s-cert", name)),
+						"tls.crt": []byte(fmt.Sprintf("fake-%s-cert", certName)),
+						"tls.key": []byte(fmt.Sprintf("fake-%s-key", certName)),
+						"ca.crt":  []byte(fmt.Sprintf("fake-%s-cert", certName)),
 					},
 				),
 			certManagerOptions,
@@ -1626,11 +1668,10 @@ func createInfraClusterCRD(group string, version string, kind string) *apiextens
 func makeIssuerReady(
 	certManagerClient *certmanagerfake.Clientset,
 	cluster *capiv2.Cluster,
-	name string,
-) func(ctx context.Context, g *WithT) {
-	return func(ctx context.Context, g *WithT) {
+	issuerName string,
+) func(ctx context.Context, g Gomega) {
+	return func(ctx context.Context, g Gomega) {
 		issuersInterface := certManagerClient.CertmanagerV1().Issuers(cluster.Namespace)
-		issuerName := fmt.Sprintf("%s-%s", cluster.Name, name)
 		issuer, err := issuersInterface.Get(ctx, issuerName, metav1.GetOptions{})
 		g.Expect(err).To(Succeed())
 		issuerApplyConfiguration, err := certmanagerv1ac.ExtractIssuer(issuer, certManagerFieldManager)

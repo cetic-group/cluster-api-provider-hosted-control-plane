@@ -299,12 +299,27 @@ spec:
 
 Each provider supports:
 
-| Field                 | Required | Description                                                           |
-| --------------------- | -------- | --------------------------------------------------------------------- |
-| `audiences`           | Yes      | Accepted `aud` claim values (at least one must match)                 |
-| `claimMappings`       | Yes      | CEL expressions mapping token claims to `username` and `groups`       |
-| `certificateAuthority`| No       | PEM-encoded CA bundle for verifying the provider's TLS certificate    |
-| `claimValidationRules`| No       | CEL expressions that must evaluate to `true` for the token to be valid|
+| Field                  | Required | Description                                                            |
+| ---------------------- | -------- | ---------------------------------------------------------------------- |
+| `audiences`            | Yes      | Accepted `aud` claim values (at least one must match)                  |
+| `claimMappings`        | Yes      | CEL expressions mapping token claims to `username` and `groups`        |
+| `certificateAuthority` | No       | PEM-encoded CA bundle for verifying the provider's TLS certificate     |
+| `claimValidationRules` | No       | CEL expressions that must evaluate to `true` for the token to be valid |
+
+## 🔑 RBAC for Users
+
+The release manifest ships two aggregated ClusterRoles so that subjects bound to the builtin `view`, `edit` or `admin`
+ClusterRoles can access `HostedControlPlane` and `HostedControlPlaneTemplate` resources without additional RBAC:
+
+- `capi-hosted-control-plane-hostedcontrolplane-viewer` is aggregated into `view` and grants read access to
+  `hostedcontrolplanes`, `hostedcontrolplanes/status`, `hostedcontrolplanes/scale` and `hostedcontrolplanetemplates`.
+- `capi-hosted-control-plane-hostedcontrolplane-editor` is aggregated into `edit` and `admin`. It grants the same read
+  access plus write access to `hostedcontrolplanes`, `hostedcontrolplanes/scale` and `hostedcontrolplanetemplates`.
+
+`edit` and `admin` do not inherit `view`, which is why the editor role carries the read verbs as well.
+Note that write access to a `HostedControlPlane` includes the free-form component `args`, audit webhook settings and
+secret mounts, so it should be treated as privileged.
+To not ship the roles, remove `./rbac-aggregation.yaml` from `config/kustomization.yaml` or patch them out when building.
 
 ## 🎛️ Configuration
 
@@ -397,10 +412,19 @@ for details on:
 - **GitHub Issues**: [Report bugs or request features](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/issues)
 - **Discussions**: [Community discussions and Q&A](https://github.com/teutonet/cluster-api-provider-hosted-control-plane/discussions)
 
+## 📫 Contact
+
+[kubernetes@teuto.net](mailto:kubernetes@teuto.net)
+
 ## 📄 License
 
 This project is licensed under the GNU Affero General Public License v3.0 -
-see the [LICENSE](LICENSE) file for details.
+see the [LICENSE](LICENSE) file for details - with an additional permission:
+software that only uses the Kubernetes API resources (CRDs) and the API Go types of this project does not
+have to be open source. Modifications of the project itself stay AGPL-3.0, including the obligation to offer the source
+to users of a modified version over the network. See [LICENSE-EXCEPTION](LICENSE-EXCEPTION) for the exact terms.
+
+SPDX identifier: `AGPL-3.0-or-later WITH AdditionRef-HCP-Interface-Exception`
 
 ---
 

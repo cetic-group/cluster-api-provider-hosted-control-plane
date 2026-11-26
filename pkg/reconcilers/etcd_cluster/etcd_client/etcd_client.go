@@ -11,6 +11,7 @@ import (
 	"time"
 
 	slices "github.com/samber/lo"
+	"github.com/samber/lo/parallel"
 	"github.com/teutonet/cluster-api-provider-hosted-control-plane/api/v1alpha1"
 	"github.com/teutonet/cluster-api-provider-hosted-control-plane/pkg/operator/util/names"
 	"github.com/teutonet/cluster-api-provider-hosted-control-plane/pkg/reconcilers/alias"
@@ -24,6 +25,7 @@ import (
 	"google.golang.org/grpc"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	konstants "k8s.io/kubernetes/cmd/kubeadm/app/constants"
 	capiv2 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 )
 
@@ -38,7 +40,7 @@ const (
 )
 
 type EtcdClient interface {
-	GetStatuses(ctx context.Context) (map[string]*clientv3.StatusResponse, error)
+	GetStatuses(ctx context.Context, readyPodNames []string) (map[string]*clientv3.StatusResponse, error)
 	OpenSnapshotStream(ctx context.Context) (*clientv3.SnapshotResponse, func() error, error)
 	ListAlarms(ctx context.Context) (*clientv3.AlarmResponse, error)
 	DisarmAlarm(ctx context.Context, alarm *clientv3.AlarmMember) error
@@ -100,7 +102,10 @@ func NewEtcdClient(
 	)
 }
 
-func (e *etcdClient) GetStatuses(ctx context.Context) (map[string]*clientv3.StatusResponse, error) {
+func (e *etcdClient) GetStatuses(
+	ctx context.Context,
+	readyPodNames []string,
+) (map[string]*clientv3.StatusResponse, error) {
 	return tracing.WithSpan(ctx, tracer, "EtcdClient.GetStatuses",
 		func(ctx context.Context, span trace.Span) (map[string]*clientv3.StatusResponse, error) {
 			ctx, cancel := context.WithTimeout(ctx, etcdDefaultCallTimeout)
@@ -108,7 +113,8 @@ func (e *etcdClient) GetStatuses(ctx context.Context) (map[string]*clientv3.Stat
 			return callETCDFuncOnAllMembers(
 				ctx,
 				e,
-				clientv3.Client.Status,
+				slices.PickByKeys(e.endpoints, readyPodNames),
+				clientv3.Maintenance.Status,
 			)
 		},
 	)
@@ -132,7 +138,7 @@ func (e *etcdClient) OpenSnapshotStream(ctx context.Context) (*clientv3.Snapshot
 				ctx,
 				etcdClient,
 				endpoint,
-				clientv3.Client.SnapshotWithVersion,
+				clientv3.Maintenance.SnapshotWithVersion,
 			)
 			return snapshotResponse, closeFunc, err
 		},
@@ -195,7 +201,7 @@ func (e *etcdClient) ListAlarms(ctx context.Context) (*clientv3.AlarmResponse, e
 				ctx,
 				etcdClient,
 				endpoint,
-				clientv3.Client.AlarmList,
+				clientv3.Maintenance.AlarmList,
 			)
 		},
 	)
@@ -209,7 +215,8 @@ func (e *etcdClient) Defragment(ctx context.Context) error {
 			_, err := callETCDFuncOnAllMembers(
 				ctx,
 				e,
-				clientv3.Client.Defragment,
+				e.endpoints,
+				clientv3.Maintenance.Defragment,
 			)
 			return err
 		},
@@ -231,7 +238,7 @@ func (e *etcdClient) DisarmAlarm(ctx context.Context, alarm *clientv3.AlarmMembe
 				ctx,
 				etcdClient,
 				endpoint,
-				func(client clientv3.Client, ctx context.Context) (*clientv3.AlarmResponse, error) {
+				func(client clientv3.Maintenance, ctx context.Context) (*clientv3.AlarmResponse, error) {
 					response, err := client.AlarmDisarm(ctx, alarm)
 					if err != nil {
 						return nil, fmt.Errorf(
@@ -250,31 +257,37 @@ func (e *etcdClient) DisarmAlarm(ctx context.Context, alarm *clientv3.AlarmMembe
 func callETCDFuncOnAllMembers[R any](
 	ctx context.Context,
 	etcd *etcdClient,
-	etcdFunc func(client clientv3.Client, ctx context.Context, endpoint string) (*R, error),
+	endpoints map[string]string,
+	etcdFunc func(client clientv3.Maintenance, ctx context.Context, endpoint string) (*R, error),
 ) (map[string]*R, error) {
 	return tracing.WithSpan(ctx, tracer, "CallETCDFuncOnAllMembers",
 		func(ctx context.Context, span trace.Span) (map[string]*R, error) {
-			endpointMap := slices.MapValues(etcd.endpoints, func(endpoint string, _ string) string {
-				return fmt.Sprintf("https://%s", net.JoinHostPort(endpoint, strconv.Itoa(int(etcd.serverPort))))
-			})
-			results := make(map[string]*R, len(endpointMap))
-			var errs error
-			for _, endpoint := range endpointMap {
-				etcdClient, err := createEtcdClient(etcd, endpoint)
-				if err != nil {
-					errs = errors.Join(errs, err)
-					continue
-				}
-				result, err := callETCDFuncOnMember(ctx, etcdClient, endpoint, etcdFunc)
-				closeEtcdClient(etcdClient, &err, endpoint)
-				if err != nil {
-					errs = errors.Join(errs, err)
-					continue
-				}
-				results[endpoint] = result
-			}
+			results := parallel.Map(slices.Values(endpoints),
+				func(endpoint string, _ int) slices.Tuple3[string, *R, error] {
+					endpointKey := fmt.Sprintf(
+						"https://%s",
+						net.JoinHostPort(endpoint, strconv.Itoa(int(etcd.serverPort))),
+					)
+					etcdClient, err := createEtcdClient(etcd, endpoint)
+					if err != nil {
+						return slices.T3[string, *R, error](endpointKey, nil, err)
+					}
+					result, err := callETCDFuncOnMember(
+						ctx, etcdClient, endpointKey, etcdFunc,
+					)
+					closeEtcdClient(etcdClient, &err, endpointKey)
+					if err != nil {
+						return slices.T3[string, *R, error](endpointKey, nil, err)
+					}
+					return slices.T3(endpointKey, result, err)
+				},
+			)
 
-			return results, errs
+			return slices.SliceToMap(results, func(result slices.Tuple3[string, *R, error]) (string, *R) {
+					return result.A, result.B
+				}), errors.Join(slices.Map(results, func(result slices.Tuple3[string, *R, error], _ int) error {
+					return result.C
+				})...)
 		},
 	)
 }
@@ -288,14 +301,14 @@ func getETCDConnectionTLS(
 	return tracing.WithSpan3(ctx, tracer, "GetETCDConnectionTLS",
 		func(ctx context.Context, span trace.Span) (*x509.CertPool, tls.Certificate, error) {
 			secrets := managementClusterClient.CoreV1().Secrets(hostedControlPlane.Namespace)
-			etcdCASecret, err := secrets.
-				Get(ctx, names.GetEtcdCASecretName(cluster), metav1.GetOptions{})
+			etcdCABundleSecret, err := secrets.
+				Get(ctx, names.GetEtcdCABundleSecretName(cluster), metav1.GetOptions{})
 			if err != nil {
-				return nil, tls.Certificate{}, fmt.Errorf("failed to get etcd CA secret: %w", err)
+				return nil, tls.Certificate{}, fmt.Errorf("failed to get etcd CA bundle secret: %w", err)
 			}
 
 			caPool := x509.NewCertPool()
-			if !caPool.AppendCertsFromPEM(etcdCASecret.Data[corev1.TLSCertKey]) {
+			if !caPool.AppendCertsFromPEM(etcdCABundleSecret.Data[konstants.CACertName]) {
 				return nil, tls.Certificate{}, errETCDCAFailedToAppend
 			}
 
@@ -321,9 +334,9 @@ func getETCDConnectionTLS(
 
 func callETCDFuncOnMember[R any](
 	ctx context.Context,
-	etcdClient *clientv3.Client,
+	etcdClient clientv3.Maintenance,
 	endpoint string,
-	etcdFunc func(client clientv3.Client, ctx context.Context, endpoint string) (R, error),
+	etcdFunc func(client clientv3.Maintenance, ctx context.Context, endpoint string) (R, error),
 ) (R, error) {
 	return tracing.WithSpan(ctx, tracer, "CallETCDFuncOnMember",
 		func(ctx context.Context, span trace.Span) (R, error) {
@@ -333,7 +346,7 @@ func callETCDFuncOnMember[R any](
 			var err error
 			var result R
 			_, _, err = slices.AttemptWithDelay(4, 5*time.Second, func(_ int, _ time.Duration) (err error) {
-				result, err = etcdFunc(*etcdClient, ctx, endpoint)
+				result, err = etcdFunc(etcdClient, ctx, endpoint)
 				return err
 			})
 
@@ -344,14 +357,14 @@ func callETCDFuncOnMember[R any](
 
 func callETCDFuncOnAnyMember[R any](
 	ctx context.Context,
-	etcdClient *clientv3.Client,
+	etcdClient clientv3.Maintenance,
 	endpoint string,
-	etcdFunc func(client clientv3.Client, ctx context.Context) (R, error),
+	etcdFunc func(client clientv3.Maintenance, ctx context.Context) (R, error),
 ) (R, error) {
 	return tracing.WithSpan(ctx, tracer, "CallETCDFuncOnAnyMember",
 		func(ctx context.Context, span trace.Span) (R, error) {
 			return callETCDFuncOnMember(ctx, etcdClient, endpoint,
-				func(client clientv3.Client, ctx context.Context, _ string) (R, error) {
+				func(client clientv3.Maintenance, ctx context.Context, _ string) (R, error) {
 					return etcdFunc(client, ctx)
 				})
 		},

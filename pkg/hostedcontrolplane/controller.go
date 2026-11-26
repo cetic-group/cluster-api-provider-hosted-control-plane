@@ -19,6 +19,7 @@ import (
 	"github.com/teutonet/cluster-api-provider-hosted-control-plane/api"
 	"github.com/teutonet/cluster-api-provider-hosted-control-plane/api/v1alpha1"
 	"github.com/teutonet/cluster-api-provider-hosted-control-plane/pkg/importcycle"
+	"github.com/teutonet/cluster-api-provider-hosted-control-plane/pkg/operator/util/emit"
 	"github.com/teutonet/cluster-api-provider-hosted-control-plane/pkg/operator/util/recorder"
 	"github.com/teutonet/cluster-api-provider-hosted-control-plane/pkg/reconcilers/alias"
 	"github.com/teutonet/cluster-api-provider-hosted-control-plane/pkg/reconcilers/apiserverresources"
@@ -26,8 +27,10 @@ import (
 	"github.com/teutonet/cluster-api-provider-hosted-control-plane/pkg/reconcilers/etcd_cluster"
 	"github.com/teutonet/cluster-api-provider-hosted-control-plane/pkg/reconcilers/etcd_cluster/etcd_client"
 	"github.com/teutonet/cluster-api-provider-hosted-control-plane/pkg/reconcilers/etcd_cluster/s3_client"
+	"github.com/teutonet/cluster-api-provider-hosted-control-plane/pkg/reconcilers/etcd_cluster/volume_stats"
 	"github.com/teutonet/cluster-api-provider-hosted-control-plane/pkg/reconcilers/infrastructure_cluster"
 	"github.com/teutonet/cluster-api-provider-hosted-control-plane/pkg/reconcilers/kubeconfig"
+	"github.com/teutonet/cluster-api-provider-hosted-control-plane/pkg/reconcilers/node_rotation"
 	"github.com/teutonet/cluster-api-provider-hosted-control-plane/pkg/reconcilers/tlsroutes"
 	"github.com/teutonet/cluster-api-provider-hosted-control-plane/pkg/reconcilers/workload"
 	errorsUtil "github.com/teutonet/cluster-api-provider-hosted-control-plane/pkg/util/errors"
@@ -42,7 +45,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/events"
 	utilNet "k8s.io/utils/net"
-	"k8s.io/utils/ptr"
 	capiv2 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	"sigs.k8s.io/cluster-api/util"
 	"sigs.k8s.io/cluster-api/util/conditions"
@@ -57,7 +59,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-	gwv1alpha2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
+	gwv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gwclient "sigs.k8s.io/gateway-api/pkg/client/clientset/versioned"
 )
 
@@ -80,6 +82,7 @@ func NewHostedControlPlaneReconciler(
 	) (*alias.WorkloadClusterClient, ciliumclient.Interface, error),
 	etcdClientFactory etcd_client.EtcdClientFactory,
 	s3ClientFactory s3_client.S3ClientFactory,
+	volumeStatsProvider volume_stats.EtcdVolumeStatsProvider,
 	recorder events.EventRecorder,
 	controllerNamespace string,
 	reconcileFilter string,
@@ -91,6 +94,7 @@ func NewHostedControlPlaneReconciler(
 		gatewayClient:                  gatewayClient,
 		etcdClientFactory:              etcdClientFactory,
 		s3ClientFactory:                s3ClientFactory,
+		volumeStatsProvider:            volumeStatsProvider,
 		ciliumClientFactory:            ciliumClientFactory,
 		workloadClusterClientFactory:   workloadClusterClientFactory,
 		recorder:                       recorder,
@@ -125,6 +129,7 @@ type hostedControlPlaneReconciler struct {
 	gatewayClient                gwclient.Interface
 	etcdClientFactory            etcd_client.EtcdClientFactory
 	s3ClientFactory              s3_client.S3ClientFactory
+	volumeStatsProvider          volume_stats.EtcdVolumeStatsProvider
 	ciliumClientFactory          func(ctx context.Context) (ciliumclient.Interface, error)
 	workloadClusterClientFactory func(
 		ctx context.Context,
@@ -188,7 +193,7 @@ func (r *hostedControlPlaneReconciler) SetupWithManager(
 			Owns(&appsv1.StatefulSet{}).
 			Owns(&appsv1.Deployment{}).
 			Owns(&policyv1.PodDisruptionBudget{}).
-			Owns(&gwv1alpha2.TLSRoute{}).
+			Owns(&gwv1.TLSRoute{}).
 			Watches(&corev1.Secret{},
 				handler.EnqueueRequestsFromMapFunc(r.secretToHostedControlPlane),
 				builder.WithPredicates(
@@ -349,7 +354,7 @@ func (r *hostedControlPlaneReconciler) resolveOwnerRefsToHostedControlPlanes(
 //+kubebuilder:rbac:groups=controlplane.cluster.x-k8s.io,resources=hostedcontrolplanes/finalizers,verbs=update
 //+kubebuilder:rbac:groups=apiextensions.k8s.io,resources=customresourcedefinitions,verbs=list;watch
 //+kubebuilder:rbac:groups=cluster.x-k8s.io,resources=clusters,verbs=get
-//+kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create
+//+kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 
 func (r *hostedControlPlaneReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	return tracing.WithSpan(ctx, r.tracer, "Reconcile",
@@ -368,13 +373,6 @@ func (r *hostedControlPlaneReconciler) Reconcile(ctx context.Context, req ctrl.R
 				return reconcile.Result{}, fmt.Errorf("failed to get HostedControlPlane: %w", err)
 			}
 
-			patchHelper, err := patch.NewHelper(hostedControlPlane, r.client)
-			if err != nil {
-				return ctrl.Result{}, fmt.Errorf("failed to create patch helper for HostedControlPlane: %w", err)
-			}
-
-			hostedControlPlane.Status.ExternalManagedControlPlane = ptr.To(true)
-
 			ctx = recorder.IntoContext(ctx, recorder.New(r.recorder, hostedControlPlane))
 
 			cluster, err := util.GetOwnerCluster(ctx, r.client, hostedControlPlane.ObjectMeta)
@@ -382,7 +380,10 @@ func (r *hostedControlPlaneReconciler) Reconcile(ctx context.Context, req ctrl.R
 				return ctrl.Result{}, fmt.Errorf("failed to retrieve owner Cluster: %w", err)
 			}
 			if cluster == nil {
-				span.AddEvent("Cluster Controller has not yet set OwnerRef")
+				emit.Info(ctx, emit.SinkSpanEvent, hostedControlPlane,
+					"ClusterOwnerRefMissing", "OwnerRefCheck",
+					"Cluster Controller has not yet set OwnerRef",
+				)
 				return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 			}
 
@@ -401,23 +402,44 @@ func (r *hostedControlPlaneReconciler) Reconcile(ctx context.Context, req ctrl.R
 					clusterMatch = cluster.Name == r.reconcileFilter
 				}
 				if !hcpMatch && !clusterMatch {
-					logr.FromContextAsSlogLogger(ctx).
-						InfoContext(ctx, "skipping reconciliation due to reconcile filter",
-							"filter", r.reconcileFilter,
-							"hcp", hostedControlPlane.Namespace+"/"+hostedControlPlane.Name,
-							"cluster", cluster.Namespace+"/"+cluster.Name,
-						)
+					emit.Info(ctx, emit.SinkLogger, hostedControlPlane,
+						"ReconcileFilterMismatch", "SkipReconcile",
+						"skipping reconciliation due to reconcile filter",
+						"filter", r.reconcileFilter,
+						"hcp", hostedControlPlane.Namespace+"/"+hostedControlPlane.Name,
+						"cluster", cluster.Namespace+"/"+cluster.Name,
+					)
 					return reconcile.Result{}, nil
 				}
 			}
 
 			isPaused, requeue, err := paused.EnsurePausedCondition(ctx, r.client, cluster, hostedControlPlane)
-			if err != nil || isPaused || requeue {
-				if err != nil {
-					return ctrl.Result{}, fmt.Errorf("failed to verify paused condition: %w", err)
-				}
+			if err != nil {
+				return ctrl.Result{}, fmt.Errorf("failed to verify paused condition: %w", err)
+			} else if isPaused || requeue {
 				return ctrl.Result{RequeueAfter: 10 * time.Second}, retErr
 			}
+
+			if hostedControlPlane.DeletionTimestamp.IsZero() {
+				if finalizerAdded, err := finalizers.EnsureFinalizer(ctx, r.client,
+					hostedControlPlane, r.finalizer,
+				); err != nil {
+					return ctrl.Result{}, errorsUtil.IfErrErrorf("failed to ensure finalizer: %w", err)
+				} else if finalizerAdded {
+					emit.Info(ctx, emit.SinkSpanEvent, hostedControlPlane,
+						"FinalizerMissing", "FinalizerAdded",
+						"Added missing finalizer",
+					)
+					return ctrl.Result{}, nil
+				}
+			}
+
+			patchHelper, err := patch.NewHelper(hostedControlPlane, r.client)
+			if err != nil {
+				return ctrl.Result{}, fmt.Errorf("failed to create patch helper for HostedControlPlane: %w", err)
+			}
+
+			hostedControlPlane.Status.ExternalManagedControlPlane = new(true)
 
 			defer func() {
 				hostedControlPlane.Status.ObservedGeneration = hostedControlPlane.Generation
@@ -427,10 +449,10 @@ func (r *hostedControlPlaneReconciler) Reconcile(ctx context.Context, req ctrl.R
 			}()
 
 			if !hostedControlPlane.DeletionTimestamp.IsZero() {
-				return r.reconcileDelete(ctx, patchHelper, hostedControlPlane)
+				return r.reconcileDelete(ctx, hostedControlPlane)
 			}
 
-			return r.reconcileNormal(ctx, patchHelper, hostedControlPlane, cluster)
+			return r.reconcileNormal(ctx, hostedControlPlane, cluster)
 		},
 	)
 }
@@ -489,17 +511,11 @@ func (r *hostedControlPlaneReconciler) patch(
 //nolint:funlen // this function is not really complex
 func (r *hostedControlPlaneReconciler) reconcileNormal(
 	ctx context.Context,
-	_ *patch.Helper,
 	hostedControlPlane *v1alpha1.HostedControlPlane,
 	cluster *capiv2.Cluster,
 ) (ctrl.Result, error) {
 	return tracing.WithSpan(ctx, r.tracer, "ReconcileNormal",
 		func(ctx context.Context, span trace.Span) (ctrl.Result, error) {
-			if finalizerAdded, err := finalizers.EnsureFinalizer(ctx, r.client,
-				hostedControlPlane, r.finalizer,
-			); err != nil || finalizerAdded {
-				return ctrl.Result{}, errorsUtil.IfErrErrorf("failed to ensure finalizer: %w", err)
-			}
 			span.SetAttributes(
 				attribute.String("hostedcontrolplane.version", hostedControlPlane.Spec.Version),
 				attribute.Int("hostedcontrolplane.replicas", int(hostedControlPlane.Spec.ReplicasOrDefault())),
@@ -507,60 +523,89 @@ func (r *hostedControlPlaneReconciler) reconcileNormal(
 
 			type Phase struct {
 				Reconcile    func(context.Context, *v1alpha1.HostedControlPlane, *capiv2.Cluster) (string, error)
-				Condition    capiv2.ConditionType
+				Condition    string
 				FailedReason string
 				Name         string
 			}
 
 			serviceDomain := "cluster.local"
-			serviceCIDR := "10.96.0.0/12"
-			podCIDR := "10.0.0.0/16"
+			serviceCIDR := net.IPNet{
+				IP:   net.IPv4(10, 96, 0, 0),
+				Mask: net.CIDRMask(12, 32),
+			}
+			podCIDR := net.IPNet{
+				IP:   net.IPv4(10, 0, 0, 0),
+				Mask: net.CIDRMask(16, 32),
+			}
 
 			if clusterSpecServiceDomain := cluster.Spec.ClusterNetwork.ServiceDomain; clusterSpecServiceDomain != "" {
 				serviceDomain = clusterSpecServiceDomain
 			}
 
-			if clusterServiceCIDR := cluster.Spec.ClusterNetwork.Services.String(); clusterServiceCIDR != "" {
-				serviceCIDR = clusterServiceCIDR
+			if clusterNetwork := cluster.Spec.ClusterNetwork.Services.String(); clusterNetwork != "" {
+				if _, clusterServiceCIDR, err := net.ParseCIDR(clusterNetwork); err != nil {
+					conditions.Set(hostedControlPlane, metav1.Condition{
+						Type:    v1alpha1.WorkloadClusterResourcesReadyCondition,
+						Status:  metav1.ConditionFalse,
+						Reason:  v1alpha1.WorkloadClusterResourcesFailedReason,
+						Message: fmt.Sprintf("Failed to parse Service CIDR %q: %v", clusterNetwork, err),
+					})
+					return ctrl.Result{}, errorsUtil.IfErrErrorf(
+						"failed to parse Service CIDR %q: %w",
+						clusterNetwork,
+						err,
+					)
+				} else {
+					serviceCIDR = *clusterServiceCIDR
+				}
 			}
 
-			if clusterPodCIDR := cluster.Spec.ClusterNetwork.Pods.String(); clusterPodCIDR != "" {
-				podCIDR = clusterPodCIDR
+			if clusterPodNetwork := cluster.Spec.ClusterNetwork.Pods.String(); clusterPodNetwork != "" {
+				if _, clusterPodCIDR, err := net.ParseCIDR(clusterPodNetwork); err != nil {
+					conditions.Set(hostedControlPlane, metav1.Condition{
+						Type:    v1alpha1.WorkloadClusterResourcesReadyCondition,
+						Status:  metav1.ConditionFalse,
+						Reason:  v1alpha1.WorkloadClusterResourcesFailedReason,
+						Message: fmt.Sprintf("Failed to parse Pod CIDR %q: %v", clusterPodNetwork, err),
+					})
+					return ctrl.Result{}, errorsUtil.IfErrErrorf(
+						"failed to parse Pod CIDR %q: %w",
+						clusterPodNetwork,
+						err,
+					)
+				} else {
+					podCIDR = *clusterPodCIDR
+				}
 			}
 
-			var dnsIP net.IP
-			var kubernetesServiceIP net.IP
-			if _, serviceNet, err := net.ParseCIDR(strings.Split(serviceCIDR, ",")[0]); err != nil {
+			dnsIP, err := utilNet.GetIndexedIP(&serviceCIDR, 10)
+			if err != nil {
 				conditions.Set(hostedControlPlane, metav1.Condition{
 					Type:    v1alpha1.WorkloadClusterResourcesReadyCondition,
 					Status:  metav1.ConditionFalse,
 					Reason:  v1alpha1.WorkloadClusterResourcesFailedReason,
-					Message: fmt.Sprintf("Failed to parse Service CIDR %q: %v", serviceCIDR, err),
+					Message: fmt.Sprintf("Failed to calculate DNS IP from Service CIDR %q: %v", serviceCIDR, err),
 				})
-				return ctrl.Result{}, errorsUtil.IfErrErrorf("failed to parse Service CIDR %q: %w", serviceCIDR, err)
-			} else {
-				dnsIP, err = utilNet.GetIndexedIP(serviceNet, 10)
-				if err != nil {
-					conditions.Set(hostedControlPlane, metav1.Condition{
-						Type:    v1alpha1.WorkloadClusterResourcesReadyCondition,
-						Status:  metav1.ConditionFalse,
-						Reason:  v1alpha1.WorkloadClusterResourcesFailedReason,
-						Message: fmt.Sprintf("Failed to calculate DNS IP from Service CIDR %q: %v", serviceCIDR, err),
-					})
-					return ctrl.Result{}, errorsUtil.IfErrErrorf("failed to calculate DNS IP from Service CIDR %q: %w",
-						serviceCIDR, err)
-				}
-				kubernetesServiceIP, err = utilNet.GetIndexedIP(serviceNet, 1)
-				if err != nil {
-					conditions.Set(hostedControlPlane, metav1.Condition{
-						Type:    v1alpha1.WorkloadClusterResourcesReadyCondition,
-						Status:  metav1.ConditionFalse,
-						Reason:  v1alpha1.WorkloadClusterResourcesFailedReason,
-						Message: fmt.Sprintf("Failed to calculate Kubernetes Service IP from Service CIDR %q: %v", serviceCIDR, err),
-					})
-					return ctrl.Result{}, errorsUtil.IfErrErrorf("failed to calculate Kubernetes Service IP from Service CIDR %q: %w",
-						serviceCIDR, err)
-				}
+				return ctrl.Result{}, errorsUtil.IfErrErrorf("failed to calculate DNS IP from Service CIDR %q: %w",
+					serviceCIDR, err)
+			}
+			kubernetesServiceIP, err := utilNet.GetIndexedIP(&serviceCIDR, 1)
+			if err != nil {
+				conditions.Set(hostedControlPlane, metav1.Condition{
+					Type:   v1alpha1.WorkloadClusterResourcesReadyCondition,
+					Status: metav1.ConditionFalse,
+					Reason: v1alpha1.WorkloadClusterResourcesFailedReason,
+					Message: fmt.Sprintf(
+						"Failed to calculate Kubernetes Service IP from Service CIDR %q: %v",
+						serviceCIDR,
+						err,
+					),
+				})
+				return ctrl.Result{}, errorsUtil.IfErrErrorf(
+					"failed to calculate Kubernetes Service IP from Service CIDR %q: %w",
+					serviceCIDR,
+					err,
+				)
 			}
 
 			var ciliumClient ciliumclient.Interface
@@ -580,11 +625,12 @@ func (r *hostedControlPlaneReconciler) reconcileNormal(
 
 			certificateReconciler := certificates.NewCertificateReconciler(
 				r.certManagerClient,
+				r.managementClusterClient,
 				kubernetesServiceIP,
-				r.caCertificatesDuration,
+				hostedControlPlane.Spec.Certificates.RootCACertificateDurationOrDefault(),
+				hostedControlPlane.Spec.Certificates.CACertificateDurationOrDefault(),
 				r.certificatesDuration,
 				r.konnectivityServerAudience,
-				recorder.FromContext(ctx),
 			)
 			kubeconfigReconciler := kubeconfig.NewKubeconfigReconciler(
 				r.managementClusterClient,
@@ -600,7 +646,7 @@ func (r *hostedControlPlaneReconciler) reconcileNormal(
 				r.etcdServerStorageIncrement,
 				r.etcdClientFactory,
 				r.s3ClientFactory,
-				recorder.FromContext(ctx),
+				r.volumeStatsProvider,
 				r.etcdComponentLabel,
 				r.apiServerComponentLabel,
 				r.controllerNamespace,
@@ -632,6 +678,7 @@ func (r *hostedControlPlaneReconciler) reconcileNormal(
 				r.client,
 				r.apiServerServicePort,
 			)
+			nodeRotationReconciler := node_rotation.NewNodeRotationReconciler(r.client, r.certManagerClient)
 			workloadClusterReconciler := workload.NewWorkloadClusterReconciler(
 				r.managementClusterClient,
 				func(
@@ -641,7 +688,7 @@ func (r *hostedControlPlaneReconciler) reconcileNormal(
 						ctx, managementClusterClient, cluster, r.controllerUsername,
 					)
 				},
-				r.caCertificatesDuration,
+				hostedControlPlane.Spec.Certificates.CACertificateDurationOrDefault(),
 				r.certificatesDuration,
 				serviceDomain,
 				serviceCIDR,
@@ -661,6 +708,12 @@ func (r *hostedControlPlaneReconciler) reconcileNormal(
 					FailedReason: v1alpha1.CACertificatesFailedReason,
 				},
 				{
+					Name:         "CA bundles",
+					Reconcile:    certificateReconciler.ReconcileCABundles,
+					Condition:    v1alpha1.CABundleReadyCondition,
+					FailedReason: v1alpha1.CABundleFailedReason,
+				},
+				{
 					Name:         "apiserver service",
 					Reconcile:    apiServerResourcesReconciler.ReconcileApiServerService,
 					Condition:    v1alpha1.APIServerServiceReadyCondition,
@@ -673,22 +726,16 @@ func (r *hostedControlPlaneReconciler) reconcileNormal(
 					FailedReason: v1alpha1.SyncControlPlaneEndpointFailedReason,
 				},
 				{
+					Name:         "tlsroutes",
+					Reconcile:    tlsRoutesReconciler.ReconcileTLSRoutes,
+					Condition:    v1alpha1.APIServerTLSRoutesReadyCondition,
+					FailedReason: v1alpha1.APIServerTLSRoutesFailedReason,
+				},
+				{
 					Name:         "certificates",
 					Reconcile:    certificateReconciler.ReconcileCertificates,
 					Condition:    v1alpha1.CertificatesReadyCondition,
 					FailedReason: v1alpha1.CertificatesFailedReason,
-				},
-				{
-					Name: "kubeconfig",
-					Reconcile: func(
-						ctx context.Context,
-						_ *v1alpha1.HostedControlPlane,
-						cluster *capiv2.Cluster,
-					) (string, error) {
-						return "", kubeconfigReconciler.ReconcileKubeconfigs(ctx, cluster)
-					},
-					Condition:    v1alpha1.KubeconfigReadyCondition,
-					FailedReason: v1alpha1.KubeconfigFailedReason,
 				},
 				{
 					Name:         "etcd cluster",
@@ -697,16 +744,78 @@ func (r *hostedControlPlaneReconciler) reconcileNormal(
 					FailedReason: v1alpha1.EtcdClusterFailedReason,
 				},
 				{
-					Name:         "apiserver deployments",
-					Reconcile:    apiServerResourcesReconciler.ReconcileApiServerDeployments,
+					Name: "internal kubeconfig",
+					Reconcile: func(
+						ctx context.Context,
+						_ *v1alpha1.HostedControlPlane,
+						cluster *capiv2.Cluster,
+					) (string, error) {
+						return "", kubeconfigReconciler.ReconcileInternalKubeconfigs(ctx, cluster)
+					},
+					Condition:    v1alpha1.InternalKubeconfigReadyCondition,
+					FailedReason: v1alpha1.InternalKubeconfigFailedReason,
+				},
+				{
+					Name: "apiserver deployments",
+					Reconcile: func(
+						ctx context.Context,
+						hostedControlPlane *v1alpha1.HostedControlPlane,
+						cluster *capiv2.Cluster,
+					) (string, error) {
+						notReady, err := apiServerResourcesReconciler.ReconcileApiServerDeployments(
+							ctx,
+							hostedControlPlane,
+							cluster,
+						)
+						if err != nil {
+							return "", fmt.Errorf("reconcile api server deployments: %w", err)
+						}
+						if notReady != "" {
+							return notReady, nil
+						}
+
+						hostedControlPlane.Status.Initialization.ControlPlaneInitialized = new(true)
+
+						return "", nil
+					},
 					Condition:    v1alpha1.APIServerDeploymentsReadyCondition,
 					FailedReason: v1alpha1.APIServerDeploymentsFailedReason,
 				},
 				{
-					Name:         "tlsroutes",
-					Reconcile:    tlsRoutesReconciler.ReconcileTLSRoutes,
-					Condition:    v1alpha1.APIServerTLSRoutesReadyCondition,
-					FailedReason: v1alpha1.APIServerTLSRoutesFailedReason,
+					// right after the rollout, as the old apiservers (and the lease reconciler they used to run)
+					// leave the endpoints empty on shutdown
+					Name:         "kubernetes service",
+					Reconcile:    workloadClusterReconciler.ReconcileKubernetesService,
+					Condition:    v1alpha1.KubernetesServiceReadyCondition,
+					FailedReason: v1alpha1.KubernetesServiceFailedReason,
+				},
+				{
+					Name: "admin kubeconfig",
+					Reconcile: func(
+						ctx context.Context,
+						_ *v1alpha1.HostedControlPlane,
+						cluster *capiv2.Cluster,
+					) (string, error) {
+						if err := kubeconfigReconciler.ReconcileAdminKubeconfig(ctx, cluster); err != nil {
+							return "", fmt.Errorf("reconcile api server deployments: %w", err)
+						}
+						hostedControlPlane.Status.Ready = true
+						return "", nil
+					},
+					Condition:    v1alpha1.AdminKubeconfigReadyCondition,
+					FailedReason: v1alpha1.AdminKubeconfigFailedReason,
+				},
+				{
+					Name: "CA rotation annotation",
+					Reconcile: func(
+						ctx context.Context,
+						hcp *v1alpha1.HostedControlPlane,
+						cluster *capiv2.Cluster,
+					) (string, error) {
+						return "", nodeRotationReconciler.ReconcileCARotation(ctx, hcp, cluster)
+					},
+					Condition:    v1alpha1.CARotationAnnotationReadyCondition,
+					FailedReason: v1alpha1.CARotationAnnotationFailedReason,
 				},
 				{
 					Name:         "workload cluster resources",
@@ -728,7 +837,7 @@ func (r *hostedControlPlaneReconciler) reconcileNormal(
 				); {
 				case err != nil:
 					conditions.Set(hostedControlPlane, metav1.Condition{
-						Type:    string(phase.Condition),
+						Type:    phase.Condition,
 						Status:  metav1.ConditionFalse,
 						Reason:  phase.FailedReason,
 						Message: fmt.Sprintf("Reconciling phase %s failed: %v", phase.Name, err),
@@ -736,7 +845,7 @@ func (r *hostedControlPlaneReconciler) reconcileNormal(
 					return reconcile.Result{}, err
 				case notReadyReason != "":
 					conditions.Set(hostedControlPlane, metav1.Condition{
-						Type:    string(phase.Condition),
+						Type:    phase.Condition,
 						Status:  metav1.ConditionFalse,
 						Reason:  notReadyReason,
 						Message: fmt.Sprintf("phase %s not ready", phase.Name),
@@ -744,7 +853,7 @@ func (r *hostedControlPlaneReconciler) reconcileNormal(
 					return reconcile.Result{RequeueAfter: 10 * time.Second}, nil
 				default:
 					conditions.Set(hostedControlPlane, metav1.Condition{
-						Type:    string(phase.Condition),
+						Type:    phase.Condition,
 						Status:  metav1.ConditionTrue,
 						Reason:  "ReconcileSucceeded",
 						Message: fmt.Sprintf("Management phase %s reconciled successfully", phase.Name),
@@ -761,7 +870,6 @@ func (r *hostedControlPlaneReconciler) reconcileNormal(
 
 func (r *hostedControlPlaneReconciler) reconcileDelete(
 	ctx context.Context,
-	_ *patch.Helper,
 	hostedControlPlane *v1alpha1.HostedControlPlane,
 ) (ctrl.Result, error) {
 	return tracing.WithSpan(ctx, r.tracer, "ReconcileDelete",

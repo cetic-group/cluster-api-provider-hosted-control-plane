@@ -1,17 +1,29 @@
 package apiserverresources
 
 import (
+	"context"
+	"strings"
 	"testing"
 
 	. "github.com/onsi/gomega"
 	slices "github.com/samber/lo"
 	"github.com/teutonet/cluster-api-provider-hosted-control-plane/api/v1alpha1"
+	"github.com/teutonet/cluster-api-provider-hosted-control-plane/pkg/operator/util/names"
+	"github.com/teutonet/cluster-api-provider-hosted-control-plane/pkg/reconcilers"
+	"github.com/teutonet/cluster-api-provider-hosted-control-plane/pkg/reconcilers/alias"
+	. "github.com/teutonet/cluster-api-provider-hosted-control-plane/test"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	corev1ac "k8s.io/client-go/applyconfigurations/core/v1"
+	"k8s.io/client-go/kubernetes/fake"
+	konstants "k8s.io/kubernetes/cmd/kubeadm/app/constants"
+	"k8s.io/kubernetes/pkg/controller/certificates/rootcacertpublisher"
+	capiv2 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 )
 
 func TestApiServerResourcesReconciler_extractAdditionalVolumesAndMounts(t *testing.T) {
-	g := NewWithT(t)
+	g, _, _ := G(t)
 	reconciler := &apiServerResourcesReconciler{}
 
 	configMapMountName := "custom-config"
@@ -150,7 +162,7 @@ func TestApiServerResourcesReconciler_ResourceLifecycle_MountConfiguration(t *te
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			g := NewWithT(t)
+			g, _, _ := G(t)
 			volumes, mounts := reconciler.extractAdditionalVolumesAndMounts(tt.mounts)
 
 			g.Expect(volumes).To(HaveLen(tt.expectedVolumeCount))
@@ -169,4 +181,203 @@ func TestApiServerResourcesReconciler_ResourceLifecycle_MountConfiguration(t *te
 			}
 		})
 	}
+}
+
+func TestReconcileAuthenticationConfig_StableOIDCProviderOrder(t *testing.T) {
+	g, _, _ := G(t)
+
+	ctx := context.Background()
+	namespace := "test-ns"
+
+	fakeClient := fake.NewClientset(&corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: namespace,
+			Name:      rootcacertpublisher.RootCACertConfigMapName,
+		},
+		Data: map[string]string{
+			konstants.CACertName: "fake-root-ca-cert",
+		},
+	})
+
+	r := &apiServerResourcesReconciler{
+		ManagementResourceReconciler: reconcilers.ManagementResourceReconciler{
+			ManagementClusterClient: &alias.ManagementClusterClient{Interface: fakeClient},
+		},
+		authenticationConfigFileName: "config.yaml",
+	}
+
+	hcp := &v1alpha1.HostedControlPlane{
+		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: "test-hcp", UID: "test-uid"},
+		Spec: v1alpha1.HostedControlPlaneSpec{
+			Version: "1.32.0",
+			HostedControlPlaneInlineSpec: v1alpha1.HostedControlPlaneInlineSpec{
+				OIDCProviders: map[string]v1alpha1.OIDCProvider{
+					"https://provider-a.example.com": {
+						CertificateAuthority: "ca-a",
+						ClaimMappings: v1alpha1.OIDCClaimMappings{
+							Username: "claims.sub",
+							Groups:   "claims.groups",
+						},
+						Audiences: []string{"aud-a"},
+					},
+					"https://provider-b.example.com": {
+						CertificateAuthority: "ca-b",
+						ClaimMappings:        v1alpha1.OIDCClaimMappings{Username: "claims.sub"},
+						Audiences:            []string{"aud-b1", "aud-b2"},
+					},
+					"https://provider-c.example.com": {
+						CertificateAuthority: "ca-c",
+						ClaimMappings:        v1alpha1.OIDCClaimMappings{Username: `"prefix:" + claims.sub`},
+						Audiences:            []string{"aud-c"},
+						ClaimValidationRules: []v1alpha1.OIDCClaimValidationRule{
+							{Expression: "claims.iss == 'https://provider-c.example.com'", Message: "issuer mismatch"},
+						},
+					},
+					"https://provider-d.example.com": {
+						CertificateAuthority: "ca-d",
+						ClaimMappings:        v1alpha1.OIDCClaimMappings{Username: "claims.email"},
+						Audiences:            []string{"aud-d"},
+					},
+					"https://provider-e.example.com": {
+						CertificateAuthority: "ca-e",
+						ClaimMappings:        v1alpha1.OIDCClaimMappings{Username: "claims.sub"},
+						Audiences:            []string{"aud-e"},
+					},
+				},
+			},
+		},
+	}
+
+	cluster := &capiv2.Cluster{
+		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: "test-cluster"},
+	}
+
+	configMapName := names.GetAuthenticationConfigMapName(cluster)
+
+	reconcileAndGetYAML := func(g Gomega) string {
+		g.Expect(r.reconcileAuthenticationConfig(ctx, hcp, cluster)).To(Succeed())
+		cm, err := fakeClient.CoreV1().ConfigMaps(namespace).Get(ctx, configMapName, metav1.GetOptions{})
+		g.Expect(err).NotTo(HaveOccurred())
+		return cm.Data[r.authenticationConfigFileName]
+	}
+
+	firstYAML := reconcileAndGetYAML(g)
+
+	for range 50 {
+		g.Expect(reconcileAndGetYAML(g)).To(Equal(firstYAML))
+	}
+}
+
+func TestBuildKonnectivityServerArgs_ServerCount(t *testing.T) {
+	tests := []struct {
+		name     string
+		replicas *int32
+		expected string
+	}{
+		{name: "defaults to the default replica count", expected: "--server-count=2"},
+		{name: "follows spec.replicas", replicas: new(int32(3)), expected: "--server-count=3"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g, ctx, _ := G(t)
+			reconciler := &apiServerResourcesReconciler{}
+			hostedControlPlane := &v1alpha1.HostedControlPlane{}
+			hostedControlPlane.Spec.Replicas = tt.replicas
+
+			args := reconciler.buildKonnectivityServerArgs(
+				ctx,
+				hostedControlPlane,
+				corev1ac.VolumeMount().WithMountPath("/pki"),
+				corev1ac.VolumeMount().WithMountPath("/kube"),
+				corev1ac.VolumeMount().WithMountPath("/uds"),
+				corev1ac.ContainerPort().WithContainerPort(8132),
+				corev1ac.ContainerPort().WithContainerPort(8133),
+				corev1ac.ContainerPort().WithContainerPort(8134),
+			)
+
+			g.Expect(args).To(ContainElement(tt.expected))
+		})
+	}
+}
+
+func TestBuildAPIServerArgs_ShutdownDelay(t *testing.T) {
+	const flag = "--shutdown-delay-duration"
+
+	tests := []struct {
+		name     string
+		userArgs map[string]string
+		expected string
+	}{
+		{name: "delays the listener shutdown by default", expected: flag + "=10s"},
+		{
+			name:     "keeps a user supplied delay",
+			userArgs: map[string]string{"shutdown-delay-duration": "0s"},
+			expected: flag + "=0s",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g, ctx, _ := G(t)
+			reconciler := &apiServerResourcesReconciler{}
+			hostedControlPlane := &v1alpha1.HostedControlPlane{}
+			hostedControlPlane.Spec.Deployment.APIServer.Args = tt.userArgs
+			cluster := &capiv2.Cluster{ObjectMeta: metav1.ObjectMeta{Namespace: "test-ns", Name: "test-cluster"}}
+
+			args := reconciler.buildAPIServerArgs(
+				ctx,
+				hostedControlPlane,
+				cluster,
+				corev1ac.VolumeMount().WithMountPath("/pki"),
+				corev1ac.VolumeMount().WithMountPath("/egress"),
+				nil,
+				corev1ac.VolumeMount().WithMountPath("/authn"),
+				corev1ac.ContainerPort().WithContainerPort(6443),
+			)
+
+			shutdownDelayArgs := slices.Filter(args, func(arg string, _ int) bool {
+				return strings.HasPrefix(arg, flag)
+			})
+			g.Expect(shutdownDelayArgs).To(ConsistOf(tt.expected))
+		})
+	}
+}
+
+func TestReconcileApiServerService_KonnectivityServicePublishesNotReadyAddresses(t *testing.T) {
+	g, ctx, _ := G(t)
+
+	namespace := "test-ns"
+	fakeClient := fake.NewClientset()
+	r := &apiServerResourcesReconciler{
+		ManagementResourceReconciler: reconcilers.ManagementResourceReconciler{
+			ManagementClusterClient: &alias.ManagementClusterClient{Interface: fakeClient},
+		},
+		apiServerServicePort:           443,
+		apiServerServiceLegacyPortName: "legacy-api",
+		konnectivityServicePort:        8132,
+		componentAPIServer:             "api-server",
+		apiContainerPortName:           intstr.FromString("api"),
+		konnectivityContainerPortName:  intstr.FromString("konnectivity"),
+	}
+	hostedControlPlane := &v1alpha1.HostedControlPlane{
+		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: "test-hcp", UID: "test-uid"},
+	}
+	cluster := &capiv2.Cluster{
+		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: "test-cluster"},
+	}
+
+	notReadyReason, err := r.ReconcileApiServerService(ctx, hostedControlPlane, cluster)
+	g.Expect(err).NotTo(HaveOccurred())
+	g.Expect(notReadyReason).To(Equal("Api Server Service is waiting on its IP"))
+
+	konnectivityService, err := fakeClient.CoreV1().Services(namespace).
+		Get(ctx, names.GetKonnectivityServiceName(cluster), metav1.GetOptions{})
+	g.Expect(err).NotTo(HaveOccurred())
+	g.Expect(konnectivityService.Spec.ClusterIP).To(Equal(corev1.ClusterIPNone))
+	g.Expect(konnectivityService.Spec.PublishNotReadyAddresses).To(BeTrue())
+	g.Expect(konnectivityService.Spec.Selector).To(Equal(names.GetControlPlaneLabels(cluster, "api-server")))
+	g.Expect(konnectivityService.Spec.Ports).To(ConsistOf(
+		HaveField("Port", int32(8132)),
+	))
 }

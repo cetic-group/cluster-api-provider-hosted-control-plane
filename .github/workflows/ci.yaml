@@ -2,7 +2,8 @@ name: CI
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # main runs publish the image, so a newer merge must not cancel one that is already running
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 on:
   push:
@@ -27,18 +28,21 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0 # needed for finding the current version
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version-file: ./go.mod
 
-      - uses: arduino/setup-task@v2
+      - uses: arduino/setup-task@v3.0.0
         with:
           version: 3.x
+
+      - uses: sigstore/cosign-installer@v4.1.3
 
       - name: Check for uncommitted changes
         run: task check-diff
@@ -53,4 +57,14 @@ jobs:
         if: github.event_name == 'push'
         run: |
           echo ${{ github.token }} | buildah login --username ${{ github.repository_owner }} --password-stdin ghcr.io
-          buildah manifest push --all ${IMAGE}
+          buildah manifest push --all --digestfile /tmp/digest "${IMAGE}"
+
+      - name: Sign image
+        if: github.event_name == 'push'
+        run: |
+          echo ${{ github.token }} | cosign login --username ${{ github.repository_owner }} --password-stdin ghcr.io
+          cosign sign --yes "${IMAGE%%:*}@$(cat /tmp/digest)"
+
+      - name: Generate and publish SBOM
+        if: github.event_name == 'push'
+        run: task sbom
