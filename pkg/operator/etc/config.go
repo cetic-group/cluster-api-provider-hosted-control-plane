@@ -31,7 +31,7 @@ type Config struct {
 	// ManagementClusterOIDC controls whether the hosted API servers trust service account tokens issued by the
 	// management cluster. This requires the management cluster to serve its OIDC discovery document and JWKS to
 	// unauthenticated clients.
-	ManagementClusterOIDC bool `env:"MANAGEMENT_CLUSTER_OIDC" envDefault:"true"`
+	ManagementClusterOIDC bool `env:"MANAGEMENT_CLUSTER_OIDC"       envDefault:"true"`
 }
 
 func GetOperatorConfig() (Config, error) {
