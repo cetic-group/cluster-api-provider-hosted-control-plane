@@ -145,3 +145,44 @@ The names of the resources the controller creates come from the helpers in `pkg/
 The project includes a `task dev` (telepresence) task for local development with remote Kubernetes clusters, allowing
 local debugging while connected to a cluster environment. This enables running the controller locally while it interacts
 with a remote Kubernetes cluster.
+
+## Notes du fork CETIC (branche `cetic/v1.8.0`)
+
+Fork `cetic-group/cluster-api-provider-hosted-control-plane` de l'amont `teutonet`. La branche `cetic/v1.8.0` part du
+tag amont `v1.8.0` et n'ajoute que deux correctifs, tous deux proposés sur `main` du fork :
+
+- `MANAGEMENT_CLUSTER_OIDC` (défaut `true`) : `false` retire l'émetteur OIDC « management-cluster » de
+  l'`AuthenticationConfiguration` des API servers hébergés (401 toutes les 10 s sinon, `teutonet#318`,
+  cetic-cloud-platform#2170 ; PR #3 du fork) ;
+- ConfigMap facultative `kube-system/coredns-custom` du cluster hébergé, importée dans le Corefile (`*.server`,
+  `*.override`, cetic-cloud-platform#2181 ; PR #4 du fork).
+
+Image : `registry.cloud.cetic-group.com/ccp/cluster-api-provider-hosted-control-plane:v1.8.0-cetic.N`, recopiée dans
+le Harbor de dev par `ccp-tools-dp-oob/onprem-deploiement/ccp-env-dev/72-images.sh` (digest conservé) : le
+management de dev ne joint pas le registre interne. Elle est posée par le chart `helm-charts-infra/capi-providers`
+(`controlPlane.hosted-control-plane.image` et `.env`), dans les values de l'Application Argo CD, jamais dans
+`values.yaml` du chart, que la dev et la prod suivent toutes deux.
+
+### Construire sans Task ni buildah
+
+Go suit `go.mod` (`GOTOOLCHAIN=go1.27.3` si le Go du poste est plus ancien) :
+
+```bash
+export GOTOOLCHAIN=go1.27.3
+go build ./... && go test ./...
+go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0 run
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+  -ldflags="-X=main.version=v1.8.0-cetic.N -s -w" -trimpath \
+  -o build/manager-amd64 ./cmd/hosted-control-plane-controller/main.go
+docker build -f Containerfile --build-arg manager=build/manager-amd64 \
+  -t registry.cloud.cetic-group.com/ccp/cluster-api-provider-hosted-control-plane:v1.8.0-cetic.N .
+docker push registry.cloud.cetic-group.com/ccp/cluster-api-provider-hosted-control-plane:v1.8.0-cetic.N
+```
+
+Puis noter le digest affiché par `docker push`, l'ajouter à la liste `IMAGES` de `72-images.sh` et lancer ce script.
+
+### Rebaser sur une nouvelle version amont
+
+Créer `cetic/vX.Y.Z` depuis le tag amont, y reprendre les commits des correctifs encore absents de l'amont
+(`git cherry-pick`), puis `go mod tidy`, les tests et le lint ci-dessus. Les conflits attendus sont dans `README.md`
+et `go.mod`. Un correctif fusionné par l'amont n'est plus repris.
