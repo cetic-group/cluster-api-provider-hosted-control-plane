@@ -52,13 +52,17 @@ func NewCoreDNSReconciler(
 			"kubernetes.io/cluster-service": "true",
 			"kubernetes.io/name":            "CoreDNS",
 		},
-		coreDNSServiceAccountName: "coredns",
-		coreDNSDNSPortName:        "dns",
-		coreDNSTCPDNSPortName:     "dns-tcp",
-		coreDNSMetricsPortName:    "metrics",
-		coreDNSResourceName:       "coredns",
-		coreDNSNamespace:          metav1.NamespaceSystem,
-		coreDNSCorefileFileName:   "Corefile",
+		coreDNSServiceAccountName:  "coredns",
+		coreDNSDNSPortName:         "dns",
+		coreDNSTCPDNSPortName:      "dns-tcp",
+		coreDNSMetricsPortName:     "metrics",
+		coreDNSResourceName:        "coredns",
+		coreDNSNamespace:           metav1.NamespaceSystem,
+		coreDNSCorefileFileName:    "Corefile",
+		coreDNSConfigMountPath:     "/etc/coredns",
+		coreDNSCustomConfigMapName: "coredns-custom",
+		coreDNSCustomMountPath:     "/etc/coredns/custom",
+		coreDNSCustomPlaceholder:   "hcp-placeholder",
 	}
 }
 
@@ -76,7 +80,21 @@ type coreDNSReconciler struct {
 	coreDNSResourceName       string
 	coreDNSNamespace          string
 	coreDNSCorefileFileName   string
+	coreDNSConfigMountPath    string
+	// coreDNSCustomConfigMapName is the optional, user managed ConfigMap with additional CoreDNS configuration,
+	// following the k3s/RKE2 convention: keys ending in .server are imported as additional server blocks, keys
+	// ending in .override are imported into the default server block.
+	coreDNSCustomConfigMapName string
+	coreDNSCustomMountPath     string
+	// coreDNSCustomPlaceholder is the name of the empty files that are always present in coreDNSCustomMountPath,
+	// so the import globs never come up empty, which CoreDNS would log as a warning on every reload.
+	coreDNSCustomPlaceholder string
 }
+
+const (
+	coreDNSServerSuffix   = ".server"
+	coreDNSOverrideSuffix = ".override"
+)
 
 var _ CoreDNSReconciler = &coreDNSReconciler{}
 
@@ -195,79 +213,6 @@ func (cr *coreDNSReconciler) reconcileCoreDNSRBAC(ctx context.Context) error {
 func (cr *coreDNSReconciler) reconcileCoreDNSConfigMap(ctx context.Context) error {
 	return tracing.WithSpan1(ctx, cr.Tracer, "ReconcileCoreDNSConfigMap",
 		func(ctx context.Context, span trace.Span) error {
-			defaultCorefile := &corefile.Corefile{
-				Servers: []*corefile.Server{
-					{
-						DomPorts: []string{fmt.Sprintf(".:%d", cr.coreDNSPort)},
-						Plugins: []*corefile.Plugin{
-							{
-								Name: "errors",
-							},
-							{
-								Name: "health",
-								Options: []*corefile.Option{
-									{
-										Name: "lameduck",
-										Args: []string{"5s"},
-									},
-								},
-							},
-							{
-								Name: "ready",
-							},
-							{
-								Name: "kubernetes",
-								Args: []string{cr.serviceDomain, "in-addr.arpa", "ip6.arpa"},
-								Options: []*corefile.Option{
-									{
-										Name: "fallthrough",
-										Args: []string{"in-addr.arpa", "ip6.arpa"},
-									},
-									{
-										Name: "ttl",
-										Args: []string{"30"},
-									},
-								},
-							},
-							{
-								Name: "prometheus",
-								Args: []string{fmt.Sprintf(":%d", cr.prometheusPort)},
-							},
-							{
-								Name: "forward",
-								Args: []string{".", "/etc/resolv.conf"},
-								Options: []*corefile.Option{
-									{
-										Name: "max_concurrent",
-										Args: []string{"1000"},
-									},
-								},
-							},
-							{
-								Name: "cache",
-								Args: []string{"30"},
-								Options: []*corefile.Option{
-									{
-										Name: "disable",
-										Args: []string{"success", cr.serviceDomain},
-									},
-									{
-										Name: "disable",
-										Args: []string{"denial", cr.serviceDomain},
-									},
-								},
-							},
-							{
-								Name: "loop",
-							},
-							{
-								Name: "loadbalance",
-							},
-						},
-					},
-				},
-			}
-
 			return cr.ReconcileConfigmap(
 				ctx,
 				cr.coreDNSNamespace,
@@ -275,11 +220,102 @@ func (cr *coreDNSReconciler) reconcileCoreDNSConfigMap(ctx context.Context) erro
 				false,
 				cr.coreDNSLabels,
 				map[string]string{
-					cr.coreDNSCorefileFileName: defaultCorefile.ToString(),
+					cr.coreDNSCorefileFileName:                          cr.buildCorefile(),
+					cr.coreDNSCustomPlaceholder + coreDNSServerSuffix:   "",
+					cr.coreDNSCustomPlaceholder + coreDNSOverrideSuffix: "",
 				},
 			)
 		},
 	)
+}
+
+func (cr *coreDNSReconciler) customImportGlob(suffix string) string {
+	return path.Join(cr.coreDNSCustomMountPath, "*"+suffix)
+}
+
+func (cr *coreDNSReconciler) buildCorefile() string {
+	defaultCorefile := &corefile.Corefile{
+		Servers: []*corefile.Server{
+			{
+				DomPorts: []string{fmt.Sprintf(".:%d", cr.coreDNSPort)},
+				Plugins: []*corefile.Plugin{
+					{
+						Name: "errors",
+					},
+					{
+						Name: "health",
+						Options: []*corefile.Option{
+							{
+								Name: "lameduck",
+								Args: []string{"5s"},
+							},
+						},
+					},
+					{
+						Name: "ready",
+					},
+					{
+						Name: "kubernetes",
+						Args: []string{cr.serviceDomain, "in-addr.arpa", "ip6.arpa"},
+						Options: []*corefile.Option{
+							{
+								Name: "fallthrough",
+								Args: []string{"in-addr.arpa", "ip6.arpa"},
+							},
+							{
+								Name: "ttl",
+								Args: []string{"30"},
+							},
+						},
+					},
+					{
+						Name: "prometheus",
+						Args: []string{fmt.Sprintf(":%d", cr.prometheusPort)},
+					},
+					{
+						Name: "forward",
+						Args: []string{".", "/etc/resolv.conf"},
+						Options: []*corefile.Option{
+							{
+								Name: "max_concurrent",
+								Args: []string{"1000"},
+							},
+						},
+					},
+					{
+						Name: "cache",
+						Args: []string{"30"},
+						Options: []*corefile.Option{
+							{
+								Name: "disable",
+								Args: []string{"success", cr.serviceDomain},
+							},
+							{
+								Name: "disable",
+								Args: []string{"denial", cr.serviceDomain},
+							},
+						},
+					},
+					{
+						Name: "loop",
+					},
+					{
+						Name: "loadbalance",
+					},
+					{
+						Name: "reload",
+					},
+					{
+						Name: "import",
+						Args: []string{cr.customImportGlob(coreDNSOverrideSuffix)},
+					},
+				},
+			},
+		},
+	}
+
+	// additional server blocks can't be expressed as a corefile.Server, so the import is appended as is
+	return defaultCorefile.ToString() + "import " + cr.customImportGlob(coreDNSServerSuffix) + "\n"
 }
 
 func (cr *coreDNSReconciler) reconcileCoreDNSDeployment(
@@ -288,20 +324,7 @@ func (cr *coreDNSReconciler) reconcileCoreDNSDeployment(
 ) (string, error) {
 	return tracing.WithSpan(ctx, cr.Tracer, "ReconcileCoreDNSDeployment",
 		func(ctx context.Context, span trace.Span) (string, error) {
-			coreDNSConfigVolume := corev1ac.Volume().
-				WithName("config-volume").
-				WithConfigMap(corev1ac.ConfigMapVolumeSource().
-					WithName(cr.coreDNSResourceName).
-					WithItems(
-						corev1ac.KeyToPath().
-							WithKey(cr.coreDNSCorefileFileName).
-							WithPath(cr.coreDNSCorefileFileName),
-					),
-				)
-			corednsConfigVolumeMount := corev1ac.VolumeMount().
-				WithName(*coreDNSConfigVolume.Name).
-				WithMountPath("/etc/coredns").
-				WithReadOnly(true)
+			volumes, volumeMounts := cr.buildCoreDNSVolumes()
 
 			healthPort := corev1ac.ContainerPort().
 				WithName("health").
@@ -319,7 +342,7 @@ func (cr *coreDNSReconciler) reconcileCoreDNSDeployment(
 					ctx,
 					hostedControlPlane.Spec.CoreDNS.Args,
 					map[string]string{
-						"conf": path.Join(*corednsConfigVolumeMount.MountPath, cr.coreDNSCorefileFileName),
+						"conf": path.Join(cr.coreDNSConfigMountPath, cr.coreDNSCorefileFileName),
 					},
 					operatorutil.ArgOption{Prefix: new("-")},
 				)...).
@@ -342,7 +365,7 @@ func (cr *coreDNSReconciler) reconcileCoreDNSDeployment(
 					healthPort,
 					readyPort,
 				).
-				WithVolumeMounts(corednsConfigVolumeMount).
+				WithVolumeMounts(volumeMounts...).
 				WithLivenessProbe(operatorutil.CreateLivenessProbe(healthPort, "/health", corev1.URISchemeHTTP)).
 				WithReadinessProbe(operatorutil.CreateReadinessProbe(readyPort, "/ready", corev1.URISchemeHTTP)).
 				WithStartupProbe(operatorutil.CreateStartupProbe(readyPort, "/ready", corev1.URISchemeHTTP))
@@ -400,7 +423,7 @@ func (cr *coreDNSReconciler) reconcileCoreDNSDeployment(
 						NeedsServiceAccount: true,
 					}),
 				},
-				[]*corev1ac.VolumeApplyConfiguration{coreDNSConfigVolume},
+				volumes,
 			)
 			if err != nil {
 				return "", fmt.Errorf("failed to reconcile CoreDNS deployment: %w", err)
@@ -412,6 +435,60 @@ func (cr *coreDNSReconciler) reconcileCoreDNSDeployment(
 			return "", nil
 		},
 	)
+}
+
+// buildCoreDNSVolumes returns the volumes for the Corefile and for the optional custom configuration. The custom
+// configuration directory always contains the empty placeholder files from the CoreDNS ConfigMap, and the keys of the
+// custom ConfigMap, if it exists. Changes are picked up by the reload plugin without restarting the pods.
+func (cr *coreDNSReconciler) buildCoreDNSVolumes() (
+	[]*corev1ac.VolumeApplyConfiguration,
+	[]*corev1ac.VolumeMountApplyConfiguration,
+) {
+	configVolume := corev1ac.Volume().
+		WithName("config-volume").
+		WithConfigMap(corev1ac.ConfigMapVolumeSource().
+			WithName(cr.coreDNSResourceName).
+			WithItems(
+				corev1ac.KeyToPath().
+					WithKey(cr.coreDNSCorefileFileName).
+					WithPath(cr.coreDNSCorefileFileName),
+			),
+		)
+	customConfigVolume := corev1ac.Volume().
+		WithName("custom-config-volume").
+		WithProjected(corev1ac.ProjectedVolumeSource().
+			WithSources(
+				corev1ac.VolumeProjection().
+					WithConfigMap(corev1ac.ConfigMapProjection().
+						WithName(cr.coreDNSResourceName).
+						WithItems(slices.Map(
+							[]string{coreDNSServerSuffix, coreDNSOverrideSuffix},
+							func(suffix string, _ int) *corev1ac.KeyToPathApplyConfiguration {
+								return corev1ac.KeyToPath().
+									WithKey(cr.coreDNSCustomPlaceholder + suffix).
+									WithPath(cr.coreDNSCustomPlaceholder + suffix)
+							},
+						)...),
+					),
+				corev1ac.VolumeProjection().
+					WithConfigMap(corev1ac.ConfigMapProjection().
+						WithName(cr.coreDNSCustomConfigMapName).
+						WithOptional(true),
+					),
+			),
+		)
+
+	return []*corev1ac.VolumeApplyConfiguration{configVolume, customConfigVolume},
+		[]*corev1ac.VolumeMountApplyConfiguration{
+			corev1ac.VolumeMount().
+				WithName(*configVolume.Name).
+				WithMountPath(cr.coreDNSConfigMountPath).
+				WithReadOnly(true),
+			corev1ac.VolumeMount().
+				WithName(*customConfigVolume.Name).
+				WithMountPath(cr.coreDNSCustomMountPath).
+				WithReadOnly(true),
+		}
 }
 
 func (cr *coreDNSReconciler) reconcileCoreDNSService(ctx context.Context) (string, error) {
