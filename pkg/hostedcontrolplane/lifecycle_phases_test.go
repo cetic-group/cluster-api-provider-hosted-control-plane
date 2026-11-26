@@ -270,6 +270,7 @@ func TestHostedControlPlane_FullLifecycle(t *testing.T) {
 		&recorder.InfiniteDiscardingFakeRecorder{},
 		"default",
 		"",
+		true,
 	)
 
 	req := reconcile.Request{
